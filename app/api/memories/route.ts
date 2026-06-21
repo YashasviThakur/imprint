@@ -6,6 +6,7 @@ import { rankMemories } from "@/lib/rank";
 import { embed, cosineSimilarity } from "@/lib/embeddings";
 import { optimizeContext } from "@/lib/context-optimizer";
 import type { Memory } from "@/lib/dynamodb";
+import { resolveUserId, unauthorized } from "@/lib/authz";
 
 // Merge all pinned memories into a result set (pinned first, de-duplicated by id).
 // Pinned = "always remember", so they must survive any relevance/limit filtering.
@@ -17,13 +18,13 @@ function withPinned(all: Memory[], results: Memory[]): Memory[] {
 
 // GET /api/memories?userId=&topic=&search=&semantic=
 export async function GET(req: NextRequest) {
-  const userId = req.nextUrl.searchParams.get("userId");
+  const userId = await resolveUserId(req);
+  if (!userId) return unauthorized();
   const topic = req.nextUrl.searchParams.get("topic") as Topic | null;
   const search   = req.nextUrl.searchParams.get("search");
   const semantic = req.nextUrl.searchParams.get("semantic");
   const optimize = req.nextUrl.searchParams.get("optimize") === "true";
   const budget   = parseInt(req.nextUrl.searchParams.get("budget") || "2000");
-  if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
 
   try {
     // Semantic search: embed the query, rank by cosine similarity
@@ -116,9 +117,10 @@ export async function GET(req: NextRequest) {
 // Direct save (MCP): { userId, content, topic, pinned, source }
 // Batch extraction: { userId, messages, source, groqApiKey }
 export async function POST(req: NextRequest) {
+  const userId = await resolveUserId(req);
+  if (!userId) return unauthorized();
   const body = await req.json();
-  const { userId, content, topic, pinned, messages, source, groqApiKey } = body;
-  if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const { content, topic, pinned, messages, source, groqApiKey } = body;
 
   try {
     // Direct single-memory save (from MCP)
@@ -231,9 +233,11 @@ export async function POST(req: NextRequest) {
 
 // PATCH /api/memories — update pinned/content/topic/tags
 export async function PATCH(req: NextRequest) {
-  const { userId, memoryId, createdAt, pinned, content, topic, tags } = await req.json();
-  if (!userId || !memoryId || !createdAt) {
-    return NextResponse.json({ error: "userId, memoryId, createdAt required" }, { status: 400 });
+  const userId = await resolveUserId(req);
+  if (!userId) return unauthorized();
+  const { memoryId, createdAt, pinned, content, topic, tags } = await req.json();
+  if (!memoryId || !createdAt) {
+    return NextResponse.json({ error: "memoryId, createdAt required" }, { status: 400 });
   }
   try {
     const updates: any = {};
@@ -251,11 +255,12 @@ export async function PATCH(req: NextRequest) {
 
 // DELETE /api/memories?userId=&memoryId=&createdAt=
 export async function DELETE(req: NextRequest) {
-  const userId = req.nextUrl.searchParams.get("userId");
+  const userId = await resolveUserId(req);
+  if (!userId) return unauthorized();
   const memoryId = req.nextUrl.searchParams.get("memoryId");
   const createdAt = req.nextUrl.searchParams.get("createdAt");
-  if (!userId || !memoryId || !createdAt) {
-    return NextResponse.json({ error: "userId, memoryId, createdAt required" }, { status: 400 });
+  if (!memoryId || !createdAt) {
+    return NextResponse.json({ error: "memoryId, createdAt required" }, { status: 400 });
   }
   try {
     await deleteMemory(userId, memoryId, createdAt);

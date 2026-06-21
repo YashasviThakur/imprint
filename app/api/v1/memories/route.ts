@@ -68,8 +68,8 @@ export async function POST(req: NextRequest) {
 
   const internal = await fetch(`${req.nextUrl.origin}/api/memories`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ userId, content, topic, pinned, source: "mcp" }),
+    headers: { "Content-Type": "application/json", "Authorization": req.headers.get("authorization") || "" },
+    body: JSON.stringify({ content, topic, pinned, source: "mcp" }),
   });
   const data = await internal.json();
   return NextResponse.json(data, { status: internal.status, headers: CORS });

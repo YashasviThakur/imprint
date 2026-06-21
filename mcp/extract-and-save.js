@@ -15,15 +15,20 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 const API_BASE = process.env.IMPRINT_API_BASE || "https://imprint-ebon.vercel.app";
+const API_KEY  = process.env.IMPRINT_API_KEY;
 const USER_ID  = process.env.IMPRINT_USER_ID;
 const GROQ_KEY = process.env.GROQ_API_KEY;
 
-const LAST_ACTIVITY_FILE = join(tmpdir(), `imprint-last-activity-${USER_ID}.json`);
+const LAST_ACTIVITY_FILE = join(tmpdir(), `imprint-last-activity-${USER_ID || "default"}.json`);
 const AFK_THRESHOLD_MS   = 30 * 60 * 1000; // 30 minutes
 
-// ── API helpers ───────────────────────────────────────────
+// ── API helpers (authenticate with the Imprint API key) ───
+function authHeaders(extra = {}) {
+  return API_KEY ? { ...extra, Authorization: `Bearer ${API_KEY}` } : extra;
+}
+
 async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
@@ -31,7 +36,7 @@ async function apiGet(path) {
 async function apiPost(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
@@ -226,7 +231,7 @@ function extractWithRegex(text) {
 // ── Fetch user's memory rules via the API ─────────────────
 async function fetchUserRules() {
   try {
-    const data = await apiGet(`/api/rules?userId=${encodeURIComponent(USER_ID)}`);
+    const data = await apiGet("/api/rules");
     return Array.isArray(data.rules) ? data.rules : null;
   } catch {
     return null;
@@ -237,7 +242,6 @@ async function fetchUserRules() {
 // The API embeds, de-duplicates, and runs contradiction detection server-side.
 async function saveFact({ content, topic }) {
   await apiPost("/api/memories", {
-    userId: USER_ID,
     content,
     topic: topic || "general",
     pinned: false,
@@ -284,8 +288,8 @@ async function generateSessionSummary(text) {
 // ── Main ──────────────────────────────────────────────────
 async function main() {
   try {
-    if (!USER_ID) {
-      process.stderr.write("[Imprint hook] IMPRINT_USER_ID not set — skipping save.\n");
+    if (!USER_ID && !API_KEY) {
+      process.stderr.write("[Imprint hook] Set IMPRINT_API_KEY (or IMPRINT_USER_ID) — skipping save.\n");
       return;
     }
     const raw = await readStdin();
