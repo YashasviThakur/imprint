@@ -2,7 +2,7 @@
 
 > Your AI coding assistant finally remembers you — across every IDE you use.
 
-Imprint gives AI coding assistants a persistent memory that survives across every session. Work naturally — Imprint silently extracts the durable facts, stores them in the cloud, and injects the relevant ones back into your next session. A fact you teach in one IDE is instantly available in the others.
+Imprint gives AI coding assistants a persistent memory that survives across every session. Work naturally — Imprint silently extracts the durable facts, **stores them locally on your machine** (working offline, no account required), and injects the relevant ones back into your next session. Opt into cloud sync and a fact you teach in one IDE becomes available in the others; leave it off and nothing ever leaves your computer.
 
 🔗 **Live:** [imprint-ebon.vercel.app](https://imprint-ebon.vercel.app)
 
@@ -26,7 +26,7 @@ Imprint fixes that permanently — and across **every** IDE, not just one.
 | **Setup** | One CLI command | Invite link |
 | **Target** | Developers, researchers | Teams, agencies |
 
-**The insight:** most memory tools serve one audience and one tool. Imprint scales from a solo developer to an enterprise team — and spans every MCP-capable IDE — on the same DynamoDB backend, zero migration.
+**The insight:** most memory tools serve one audience and one tool. Imprint scales from a solo developer to an enterprise team — and spans every MCP-capable IDE — on a **local-first store that optionally syncs to one shared DynamoDB backend**, zero migration. Run it 100% locally, or flip on sync for backup and cross-device/team memory.
 
 ---
 
@@ -58,20 +58,22 @@ flowchart TB
   subgraph SURF["Surfaces"]
     direction LR
     IDE["AI coding agents<br/>Claude Code · Cursor · Codex · Antigravity"]
-    DASH["Dashboard<br/>memory graph · analytics · rules"]
+    DASH["Dashboard<br/>graph · analytics · rules · sync toggle"]
     ORG["Enterprise<br/>shared org pool · BYOK"]
   end
 
-  subgraph CAP["Capture"]
+  subgraph CAP["Capture — on your machine"]
     direction LR
     MCP["MCP server<br/>tools · stdio"]
-    HOOK["Stop + PreCompact hooks<br/>guaranteed Groq extraction"]
+    HOOK["Stop + PreCompact hooks<br/>Groq extraction"]
   end
+
+  LOCAL[("Local store — ~/.imprint<br/>source of truth · offline<br/>cross-process lock · optional AES-256<br/>optional on-device embeddings")]
 
   subgraph API["API — Next.js on Vercel"]
     direction LR
     MEM["/api/memories<br/>save · search · pin · dedup · contradiction-check"]
-    SESS["/api/sessions · rules · org"]
+    SESS["/api/user · sessions · rules · org"]
     AUTH["NextAuth<br/>Google OAuth"]
   end
 
@@ -84,31 +86,28 @@ flowchart TB
 
   DB[("DynamoDB — single table<br/>USER#id · MEMORY#ts · TTL")]
 
-  IDE --> MCP
-  IDE --> HOOK
+  IDE --> MCP --> LOCAL
+  IDE --> HOOK --> LOCAL
+  LOCAL <-->|"sync ON only · bidirectional<br/>saves · edits · pins · deletes"| MEM
   DASH --> MEM
   ORG --> MEM
-  MCP --> MEM
-  HOOK --> MEM
   MEM --> AUTH
   MEM --> GROQ
   MEM --> JINA
   MEM --> RANK
-  GROQ --> DB
-  JINA --> DB
-  RANK --> DB
   MEM --> DB
 ```
 
-*Data flows **down** to save (write path) and **up** to retrieve (read path). Every surface reads and writes the same store.*
+*Reads and writes hit the **local store first** (instant, offline). When the per-user sync toggle is on, the local store and DynamoDB reconcile **bidirectionally**; when it's off, the cloud is never contacted.*
 
-**The five layers**
+**The layers**
 
-1. **Surfaces** — Claude Code, Cursor, Codex, Antigravity (and any MCP-capable IDE), plus the web dashboard and an enterprise org pool.
-2. **Capture** — the MCP server (stdio tools) *and* a guaranteed Stop/PreCompact hook that runs Groq extraction even when the model forgets to call `save_memory`.
-3. **API** — Next.js on Vercel: `/api/memories` (save, search, pin, dedup, contradiction-check), `/api/sessions`, `/api/rules`, `/api/org`; NextAuth (Google OAuth).
-4. **Intelligence** — Groq (`llama-3.3-70b`) for extraction, contradiction detection, and zero-score rerank; Jina embeddings (1024-dim); relevance ranking with dedup and always-injected pinned facts.
-5. **Storage** — DynamoDB single-table; 30-day TTL on unpinned memories, no TTL on pinned.
+1. **Surfaces** — Claude Code, Cursor, Codex, Antigravity (and any MCP-capable IDE), plus the web dashboard (with the cloud-sync toggle) and an enterprise org pool.
+2. **Capture** — the MCP server (stdio tools) *and* a guaranteed Stop/PreCompact hook that runs Groq extraction even when the model forgets to call `save_memory`. Both write the local store first.
+3. **Local store** (`~/.imprint`) — the on-device source of truth: zero-dependency JSON, cross-process file lock (server + hook), dedup, TTL, pinned-first ranking, optional AES-256-GCM at rest, and optional on-device semantic search. Works fully offline with no account.
+4. **Sync** — when the per-user toggle is on, a best-effort engine reconciles the local store with the cloud **bidirectionally**: new memories, edits, pins, and deletes propagate both ways (cloud-id reconciliation + tombstones so deletes stick and never resurrect; pending local edits are never clobbered).
+5. **API + Intelligence** — Next.js on Vercel: `/api/memories`, `/api/user` (incl. the sync flag), `/api/sessions`, `/api/rules`, `/api/org`; NextAuth (Google OAuth). Groq for extraction/contradiction/rerank, Jina embeddings (1024-dim), relevance ranking with always-injected pinned facts.
+6. **Storage** — DynamoDB single-table; 30-day TTL on unpinned memories, no TTL on pinned.
 
 > Full diagrams, data flows, and the data model: see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -152,13 +151,14 @@ flowchart TB
 
 | Layer | Tech |
 |---|---|
+| Local store | Zero-dependency JSON at `~/.imprint` · cross-process lock · optional AES-256-GCM |
+| Sync | Best-effort bidirectional reconcile (tombstones + cloud-id reconciliation) |
+| Cloud database | AWS DynamoDB (single-table) — optional mirror, per-user toggle |
 | Frontend + Dashboard | Next.js 16 (App Router), Vercel |
 | Auth | NextAuth (Auth.js) — Google OAuth |
-| Database | AWS DynamoDB (single-table design) |
-| Memory Extraction | Groq API (llama-3.3-70b) + regex fallback |
-| Embeddings | Jina AI (1024-dim) — semantic retrieval |
+| Memory extraction | Groq API (llama-3.3-70b) + regex fallback |
+| Embeddings | Jina AI (1024-dim, cloud) · optional on-device all-MiniLM-L6-v2 (local) |
 | MCP Server | Node.js, @modelcontextprotocol/sdk |
-| Extraction (hook) | Groq API (llama-3.3-70b) + regex fallback |
 
 ---
 
@@ -169,7 +169,8 @@ flowchart TB
 | Claude Code / Desktop | ✅ Live | MCP server + Stop hook |
 | Cursor · Codex · Antigravity | ✅ Live | MCP server |
 | Dashboard | ✅ Live | Web app at /dashboard |
-| Any machine | ✅ Portable | Install MCP + same user ID |
+| Offline / no account | ✅ Local-first | MCP server alone — store in `~/.imprint` |
+| Cross-device / team | ✅ Optional | Turn on cloud sync + same user ID |
 
 ---
 
