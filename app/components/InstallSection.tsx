@@ -393,6 +393,20 @@ export default function InstallSection() {
           </span>
         </motion.div>
 
+        {/* Local-first note */}
+        <motion.p
+          initial={{ opacity: 0 }}
+          animate={inView ? { opacity: 1 } : {}}
+          transition={{ duration: 0.5, delay: 0.6 }}
+          style={{ marginTop: 16, fontSize: 12.5, color: "rgba(255,255,255,0.3)", maxWidth: 620, lineHeight: 1.6 }}
+        >
+          <strong style={{ color: "rgba(255,255,255,0.5)" }}>Runs locally first.</strong>{" "}
+          Memories are stored on your machine (<code style={{ color: "rgba(255,255,255,0.45)" }}>~/.imprint</code>) and
+          work offline — <code style={{ color: "rgba(255,255,255,0.45)" }}>IMPRINT_USER_ID</code> is optional. Add it and
+          flip <em>Sync on</em> in your dashboard to back up and sync to the cloud; flip it to <em>Local only</em> and
+          nothing leaves your computer.
+        </motion.p>
+
         {/* "Your IDE not listed?" nudge */}
         {active !== "custom" && (
           <motion.p

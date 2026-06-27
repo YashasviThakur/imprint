@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
-import { Pin, Trash2, Edit3, X, Plus, Download, Upload, Search, LogOut, RefreshCw, Link2, ChevronDown, ChevronRight, FolderPlus, Tag } from "lucide-react";
+import { Pin, Trash2, Edit3, X, Plus, Download, Upload, Search, LogOut, RefreshCw, Link2, ChevronDown, ChevronRight, FolderPlus, Tag, Cloud, CloudOff } from "lucide-react";
 import ImprintLogo from "@/app/components/ImprintLogo";
 import BackgroundVideo from "@/app/components/BackgroundVideo";
 
@@ -1152,6 +1152,8 @@ export default function Dashboard() {
   const [showConnect,    setShowConnect]    = useState(false);
   const [managerProject, setManagerProject] = useState<CustomProject | null>(null);
   const [showQuickTag,   setShowQuickTag]   = useState(false);
+  const [syncEnabled,    setSyncEnabled]    = useState<boolean | null>(null);
+  const [syncSaving,     setSyncSaving]     = useState(false);
   const mapRef        = useRef<HTMLDivElement>(null);
   const lastCount     = useRef(0);
   const introStarted  = useRef(false);
@@ -1199,7 +1201,32 @@ export default function Dashboard() {
       setCustomProjects(cloud);
     } catch {}
   }
-  useEffect(() => { if (isLoaded && userId) { loadMemories(); loadProjects(); } }, [isLoaded, userId]);
+  async function loadSync() {
+    if (!userId) return;
+    try {
+      const r = await fetch(`/api/user?userId=${encodeURIComponent(userId)}`);
+      if (!r.ok) return; // leave the toggle hidden on failure rather than misreading an error body
+      const d = await r.json();
+      setSyncEnabled(d.syncEnabled !== false);
+    } catch {}
+  }
+  // Flip the cloud-sync toggle. The local MCP client reads this flag on startup;
+  // OFF means memories stay only on the user's machine, never uploaded.
+  async function toggleSync() {
+    if (!userId || syncSaving || syncEnabled === null) return;
+    const next = !syncEnabled;
+    setSyncSaving(true); setSyncEnabled(next); // optimistic
+    try {
+      const r = await fetch("/api/user", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, syncEnabled: next }),
+      });
+      if (!r.ok) throw new Error("patch failed");
+    } catch { setSyncEnabled(!next); } // revert on failure
+    setSyncSaving(false);
+  }
+  useEffect(() => { if (isLoaded && userId) { loadMemories(); loadProjects(); loadSync(); } }, [isLoaded, userId]);
   useEffect(() => { setVisibleCount(20); }, [scrollFilter]);
 
   async function copyConfig() {
@@ -1476,6 +1503,23 @@ export default function Dashboard() {
           </button>
         )}
         <div style={{ flex:1 }} />
+        {syncEnabled !== null && (
+          <button
+            className="hbtn"
+            onClick={toggleSync}
+            title={syncEnabled
+              ? "Cloud sync ON — memories back up to the cloud and sync across devices. Click to keep them local-only."
+              : "Local only — memories stay on your machine and are never uploaded to the cloud. Click to enable cloud sync."}
+            style={{ display:"flex", alignItems:"center", gap:6, height:30, padding:"0 10px", borderRadius:8,
+              background: syncEnabled ? "rgba(94,234,212,0.12)" : "rgba(255,255,255,0.05)",
+              border:`1px solid ${syncEnabled ? "#5EEAD433" : "rgba(255,255,255,0.12)"}`,
+              color: syncEnabled ? "#5EEAD4" : "rgba(255,255,255,0.5)", cursor:"pointer",
+              fontSize:11.5, fontWeight:600, whiteSpace:"nowrap", flexShrink:0,
+              opacity: syncSaving ? 0.55 : 1, transition:"all .15s" }}>
+            {syncEnabled ? <Cloud size={14}/> : <CloudOff size={14}/>}
+            <span>{syncEnabled ? "Sync on" : "Local only"}</span>
+          </button>
+        )}
         {([
           { icon:<Link2 size={14}/>,  onClick:()=>setShowConnect(true),   title:"Connect IDE", bg:"rgba(94,234,212,0.12)", col:"#5EEAD4"            },
           { icon:<Plus size={14}/>,   onClick:()=>setShowAddModal(true),  title:"Add",    bg:"rgba(255,255,255,0.07)", col:"#fff"                   },

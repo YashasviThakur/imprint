@@ -13,9 +13,14 @@
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { loadConfig, localSave, localSaveMany } from "./local-store.js";
 
 const API_BASE = process.env.IMPRINT_API_BASE || "https://imprint-ebon.vercel.app";
-const USER_ID  = process.env.IMPRINT_USER_ID;
+const CFG      = loadConfig();
+// Local-first: facts always save to the local store. A userId + sync ON mirrors
+// them to the cloud; otherwise nothing leaves the machine.
+const USER_ID  = process.env.IMPRINT_USER_ID || CFG.userId || null;
+const HYBRID   = !!USER_ID && CFG.syncEnabled;
 const GROQ_KEY = process.env.GROQ_API_KEY;
 
 const LAST_ACTIVITY_FILE = join(tmpdir(), `imprint-last-activity-${USER_ID}.json`);
@@ -222,8 +227,10 @@ function extractWithRegex(text) {
   return facts;
 }
 
-// ── Fetch user's memory rules via the API ─────────────────
+// ── Fetch user's memory rules ─────────────────────────────
+// Only consult the cloud rules when syncing; local-only runs keep all topics on.
 async function fetchUserRules() {
+  if (!HYBRID) return null;
   try {
     const data = await apiGet(`/api/rules?userId=${encodeURIComponent(USER_ID)}`);
     return Array.isArray(data.rules) ? data.rules : null;
@@ -232,16 +239,34 @@ async function fetchUserRules() {
   }
 }
 
-// ── Save a fact via the hosted API ────────────────────────
-// The API embeds, de-duplicates, and runs contradiction detection server-side.
+// ── Save a fact ───────────────────────────────────────────
+// Single save (used for the AFK summary). Always writes locally; mirrors to the
+// cloud when sync is on (the API embeds + runs contradiction detection).
 async function saveFact({ content, topic }) {
-  await apiPost("/api/memories", {
-    userId: USER_ID,
-    content,
-    topic: topic || "general",
-    pinned: false,
-    source: "stop-hook",
-  });
+  const { deduped } = localSave({ content, topic: topic || "general", pinned: false, source: "stop-hook" });
+  if (HYBRID && !deduped) {
+    try {
+      await apiPost("/api/memories", { userId: USER_ID, content, topic: topic || "general", pinned: false, source: "stop-hook" });
+    } catch { /* best-effort — local copy is already saved */ }
+  }
+}
+
+// Save several extracted facts in ONE local read-modify-write (the hook runs on
+// every assistant response, so per-fact full-file rewrites add up). New (non-dup)
+// facts are then mirrored to the cloud when sync is on.
+async function saveFacts(facts) {
+  const results = localSaveMany(
+    facts.map((f) => ({ content: f.content, topic: f.topic || "general", pinned: false, source: "stop-hook" }))
+  );
+  if (!HYBRID) return;
+  for (const r of results) {
+    if (r.deduped) continue;
+    try {
+      await apiPost("/api/memories", {
+        userId: USER_ID, content: r.memory.content, topic: r.memory.topic, pinned: false, source: "stop-hook",
+      });
+    } catch { /* best-effort — local copy is already saved */ }
+  }
 }
 
 // ── AFK session summary ───────────────────────────────────
@@ -283,10 +308,8 @@ async function generateSessionSummary(text) {
 // ── Main ──────────────────────────────────────────────────
 async function main() {
   try {
-    if (!USER_ID) {
-      process.stderr.write("[Imprint hook] IMPRINT_USER_ID not set — skipping save.\n");
-      return;
-    }
+    // No userId is fine — we still capture to the local store. A userId + sync
+    // ON additionally mirrors to the cloud (see saveFact / HYBRID).
     const raw = await readStdin();
     if (!raw.trim()) return;
 
@@ -356,10 +379,9 @@ async function main() {
 
     if (!facts.length) return;
 
-    // The hosted API de-duplicates and runs contradiction detection on each save.
-    for (const fact of facts) {
-      await saveFact(fact);
-    }
+    // One batched local write for all facts; cloud mirror (if on) de-duplicates
+    // and runs contradiction detection server-side.
+    await saveFacts(facts);
   } catch (e) {
     process.stderr.write(`[Imprint hook] ${e.message}\n`);
   }

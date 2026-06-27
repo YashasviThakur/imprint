@@ -37,13 +37,17 @@ You work in your AI IDE
        ↓
 Imprint silently extracts facts (Groq LLM + regex fallback)
        ↓
-Facts stored in DynamoDB:
+Facts stored LOCALLY first:  ~/.imprint/memories.json   (works offline, no account)
+       ↓
+If cloud sync is ON, mirrored to DynamoDB:
   Personal:   USER#userId    → MEMORY#timestamp
   Enterprise: USER#org_orgId → MEMORY#timestamp  (shared with the whole team)
        ↓
 Next session: get_memories() fires automatically
 Your assistant already knows you — and your team's context
 ```
+
+**Hybrid by design.** The local JSON store is the source of truth on each machine, so Imprint is instant and works with no network. A per-user **cloud-sync toggle** (dashboard → "Sync on / Local only") controls whether memories are also mirrored to DynamoDB for backup and cross-device/team sync. Turn it off and nothing ever leaves your computer.
 
 ---
 
@@ -177,7 +181,7 @@ flowchart TB
 
 For **Claude Code** and any MCP-capable IDE. One-time setup, works on any machine.
 
-> **No AWS account needed.** The MCP connects to Imprint's hosted API — your memories are stored securely in our DynamoDB backend. Just set your own user ID and you're done.
+> **Local-first.** The MCP server stores your memories on your own machine (`~/.imprint/memories.json`) and works fully offline — **no account and no AWS needed**. Setting `IMPRINT_USER_ID` is **optional**: add it (and leave the sync toggle ON in the dashboard) to also back up and sync your memories to the cloud across devices. Flip the toggle OFF anytime and your data stays only on your computer.
 
 **Step 1 — Clone and install dependencies**
 ```bash
@@ -192,15 +196,15 @@ claude mcp add imprint --scope user -- node /absolute/path/to/imprint/mcp/server
 ```
 > Replace `/absolute/path/to/imprint` with your actual path, e.g. `C:/Users/you/Downloads/imprint`
 
-**Step 3 — Set your user ID**
+**Step 3 — (Optional) Set your user ID for cloud sync**
 
-Open `~/.claude.json` and add under `mcpServers.imprint.env`:
+Skip this for 100% local use. To back up and sync your memories to the cloud, open `~/.claude.json` and add under `mcpServers.imprint.env`:
 ```json
 {
   "IMPRINT_USER_ID": "your-unique-id"
 }
 ```
-> Use anything unique — your name, email, or a random string. This namespaces your memories so they're private to you.
+> Use anything unique — your name, email, or a random string. This namespaces your memories so they're private to you, and links this machine to the cloud-sync toggle in your dashboard. Without it, Imprint runs purely locally.
 
 **Step 4 — Add the Stop Hook** (auto-saves after every response + AFK session summaries)
 
@@ -341,8 +345,36 @@ All team members' sessions automatically receive both their personal memories **
 | `get_memories` | Fires at session start. Pass `query` = the user's first message for relevance-ranked results (semantic search) instead of just the most recent memories |
 | `save_memory` | Save a new fact (content, topic, keywords) — runs contradiction detection and warns on conflicts |
 | `search_memories` | Semantic search — call before answering any personal question, and on topic shifts |
-| `delete_memory` | Forget something permanently |
-| `pin_memory` | Mark as always-inject — never missed |
+| `delete_memory` | Forget something permanently — the deletion propagates to the cloud and is never resurrected by a later sync |
+| `update_memory` | Correct/rewrite a memory's content or topic in place — syncs as an edit (no duplicate) |
+| `pin_memory` | Mark as always-inject — never missed; pin/unpin changes sync to the cloud |
+| `summarize_session` | Save the key facts learned this session as memories |
+| `sync_status` | Report where memories live (local / hybrid), counts, pending uploads/deletions, and last sync |
+
+> **Local-first.** Every tool reads/writes the on-device store (`~/.imprint`) first, so it works offline. When cloud sync is on, changes mirror to DynamoDB **bidirectionally** — saves, deletes, and pins all propagate, with cross-process-safe writes shared by the server and the Stop hook. Run the MCP test suite with `cd mcp && npm test`.
+
+### Optional: on-device semantic search
+
+By default, **local** search (sync off / offline) is keyword-based — fast and zero-dependency. For meaning-based retrieval **without sending anything to the cloud**, enable on-device embeddings:
+
+```bash
+cd mcp && npm i @huggingface/transformers   # or @xenova/transformers
+export IMPRINT_LOCAL_EMBED=1                  # (Windows PowerShell: $env:IMPRINT_LOCAL_EMBED=1)
+```
+
+A small sentence-transformer (`all-MiniLM-L6-v2`, ~25 MB) downloads once into `~/.imprint/models` and runs on CPU. Memories are embedded and cached locally; queries are matched by cosine similarity, so *"what frameworks do I like"* finds *"prefers TypeScript and Next.js"* even with no shared words. Keyword search remains the fallback if the library/model isn't present. Check the active mode anytime with the `sync_status` tool. In hybrid mode, cloud (Jina) semantic search is used when online.
+
+### Optional: encryption at rest
+
+By default the local store is plaintext JSON. To encrypt the sensitive files (`memories.json`, `tombstones.json`) on disk with **AES-256-GCM**, set a passphrase:
+
+```bash
+export IMPRINT_ENCRYPTION_KEY="a long passphrase"   # PowerShell: $env:IMPRINT_ENCRYPTION_KEY="..."
+```
+
+The key is derived with scrypt; each file carries its own salt + IV. Existing plaintext files are migrated to encrypted on their next write. If the file is encrypted and the passphrase is missing or wrong, Imprint **refuses to read** rather than silently overwriting your data — keep the passphrase safe (there's no recovery).
+
+> **Note on sync.** The flag is read from the dashboard toggle and re-checked periodically, so flipping *Sync on / Local only* takes effect without restarting your IDE. Cloud sync is bidirectional and **convergent**: new memories, edits, pins, and deletes propagate both ways; a pending local edit is never clobbered by a pull. Encryption is local-only and doesn't change what the cloud stores.
 
 ---
 
