@@ -372,6 +372,24 @@ section("at-rest encryption (separate processes)");
   try { rmSync(encHome, { recursive: true, force: true }); rmSync(migHome, { recursive: true, force: true }); } catch {}
 }
 
+section("hybrid retrieval (BM25 + RRF)");
+{
+  // BM25/IDF: a rare query term should dominate a generic common one.
+  store.localSave({ content: "User deploys Kubernetes clusters every morning.", topic: "work" });
+  const lex = store.localSearch("user kubernetes", 10);
+  ok(lex[0]?.content.includes("Kubernetes"), "BM25 ranks the rare-term match first (IDF), not a generic 'user' match");
+
+  // Hybrid RRF: a doc matching BOTH lexically and semantically ranks top.
+  const embed = await import("./embed-local.js");
+  embed.setEmbedderForTest((t) => {
+    const x = String(t).toLowerCase();
+    return [/(kube|helm|cluster|devops)/.test(x) ? 1 : 0, /(framework|typescript|next)/.test(x) ? 1 : 0, 0];
+  });
+  const hyb = await store.localSearchSemantic("kubernetes", 10);
+  ok(hyb[0]?.content.includes("Kubernetes"), "RRF fuses lexical + semantic — the doc matching both ranks first");
+  embed.setEmbedderForTest(null);
+}
+
 // ════════════════════════════════════════════════════════════
 section("cross-process concurrency (the file lock)");
 {

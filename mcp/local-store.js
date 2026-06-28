@@ -432,8 +432,57 @@ export function persistLocalEmbeddings(updates) {
   });
 }
 
-// Semantic search using on-device embeddings when available, else keyword search.
-// Async because embedding is async. Computes (and caches) any missing vectors.
+// ── lexical scoring: BM25-lite ────────────────────────────
+// Proper IDF-weighted, length-normalized term scoring (Okapi BM25) over each
+// memory's content + keywords — far better than naive overlap: rare terms count
+// more, common terms less, and long memories don't win by sheer length. A light
+// prefix match (prefer↔prefers, framework↔frameworks) stands in for stemming.
+const tokenize = (s) => norm(s).split(/\s+/).filter(Boolean);
+const termMatch = (token, term) => token === term || token.startsWith(term) || term.startsWith(token);
+
+function bm25Ranked(query, docs) {
+  const terms = tokenize(query).filter((w) => w.length > 2);
+  if (!terms.length || !docs.length) return [];
+  const k1 = 1.5, b = 0.75;
+  const N = docs.length;
+  const docTokens = docs.map((d) => tokenize(`${d.content} ${(d.keywords || []).join(" ")}`));
+  const avgdl = docTokens.reduce((a, t) => a + t.length, 0) / N || 1;
+  const df = {};
+  for (const t of terms) df[t] = docTokens.filter((dt) => dt.some((w) => termMatch(w, t))).length;
+
+  return docs
+    .map((d, i) => {
+      const dt = docTokens[i];
+      const dl = dt.length || 1;
+      let s = 0;
+      for (const t of terms) {
+        const n = df[t];
+        if (!n) continue;
+        const tf = dt.reduce((c, w) => c + (termMatch(w, t) ? 1 : 0), 0);
+        if (!tf) continue;
+        const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+        s += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl));
+      }
+      return { m: d, score: s };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+}
+
+// Keyword search — BM25-lite, with a light recency/pin nudge; pinned guaranteed.
+export function localSearch(query, limit = 10) {
+  const all = readLive();
+  const ranked = bm25Ranked(query, all)
+    .map((x) => ({ m: x.m, score: x.score * (1 + Math.min(scoreMemory(x.m) / 2, 1) * 0.15) }))
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.m);
+  return withPinnedFirst(all, ranked.slice(0, limit));
+}
+
+// Hybrid semantic search — fuses lexical (BM25) and on-device embedding ranks via
+// Reciprocal Rank Fusion (the technique strong retrieval stacks use), so a result
+// that's a good lexical AND semantic match outranks one that's only one or the
+// other. Falls back to pure keyword search when embeddings aren't available.
 export async function localSearchSemantic(query, limit = 10) {
   let embedder;
   try { embedder = await import("./embed-local.js"); } catch { return localSearch(query, limit); }
@@ -442,6 +491,7 @@ export async function localSearchSemantic(query, limit = 10) {
   const all = readLive();
   if (!all.length) return [];
 
+  // Ensure each memory has an up-to-date on-device embedding (computed + cached).
   const model = embedder.MODEL_NAME;
   const updates = [];
   for (const m of all) {
@@ -456,47 +506,34 @@ export async function localSearchSemantic(query, limit = 10) {
   if (updates.length) persistLocalEmbeddings(updates);
 
   const qvec = await embedder.embed(query);
-  if (!qvec) return localSearch(query, limit); // embedding the query failed → keyword
+  if (!qvec) return localSearch(query, limit);
 
-  const scored = all
-    .map((m) => {
-      if (!m._localEmbedding) return null;
-      const sim = embedder.cosine(qvec, embedder.unpackVec(m._localEmbedding));
-      // Blend semantic similarity with a light recency/pin nudge (same spirit as
-      // the keyword path) so ties favour fresher, more durable memories.
-      return { m, score: sim + scoreMemory(m) * 0.05 };
+  // Lexical ranking (BM25) and semantic ranking (cosine), each as ordered lists.
+  const lexRank = new Map(bm25Ranked(query, all).map((x, i) => [x.m.memoryId, i]));
+  const semRank = new Map(
+    all
+      .map((m) => ({ m, score: m._localEmbedding ? embedder.cosine(qvec, embedder.unpackVec(m._localEmbedding)) : 0 }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((x, i) => [x.m.memoryId, i])
+  );
+
+  // Reciprocal Rank Fusion (k=60) + a tiny recency/pin tiebreak.
+  const K = 60;
+  const ids = new Set([...lexRank.keys(), ...semRank.keys()]);
+  const fused = [...ids]
+    .map((id) => {
+      const m = all.find((x) => x.memoryId === id);
+      let s = 0;
+      if (lexRank.has(id)) s += 1 / (K + lexRank.get(id));
+      if (semRank.has(id)) s += 1 / (K + semRank.get(id));
+      return { m, score: s + scoreMemory(m) * 0.001 };
     })
-    .filter((x) => x && x.score > 0)
     .sort((a, b) => b.score - a.score)
     .map((x) => x.m);
 
-  // If nothing embedded/matched, don't return an empty set — fall back to keyword.
-  if (!scored.length) return localSearch(query, limit);
-  // Preserve relevance order (most similar first) — that's the point of a
-  // semantic query — while still guaranteeing pinned memories are present.
-  return withPinnedFirst(all, scored.slice(0, limit));
-}
-
-// Keyword search ranked by overlap + recency; pinned always included.
-export function localSearch(query, limit = 10) {
-  const all = readLive();
-  const words = norm(query).split(/\s+/).filter((w) => w.length > 2);
-
-  const scored = all
-    .map((m) => {
-      const hay = `${m.content} ${(m.keywords || []).join(" ")}`.toLowerCase();
-      const hits = words.filter((w) => hay.includes(w)).length;
-      if (hits === 0) return null;
-      // overlap (0–1) blended with the recency/pin score so fresh, relevant
-      // memories rank above stale ones with the same keyword overlap.
-      const overlap = hits / Math.max(words.length, 1);
-      return { m, score: overlap + scoreMemory(m) * 0.1 };
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.score - a.score)
-    .map((x) => x.m);
-
-  return rank(withPinnedFirst(all, scored.slice(0, limit)));
+  if (!fused.length) return localSearch(query, limit);
+  return withPinnedFirst(all, fused.slice(0, limit));
 }
 
 // Delete a memory and record a tombstone so the deletion propagates to the cloud

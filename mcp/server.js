@@ -367,7 +367,7 @@ server.tool(
         `Mode: ${mode}`,
         `Store: ${STORE_DIR}`,
         `Memories: ${stats.total} (${stats.pinned} pinned)`,
-        `Local search: ${embedOn ? `semantic (on-device embeddings · ${EMBED_MODEL})` : "keyword (set IMPRINT_LOCAL_EMBED=1 + install transformers.js for semantic)"}`,
+        `Local search: ${embedOn ? `hybrid — BM25 + on-device embeddings via RRF (${EMBED_MODEL})` : "BM25 keyword (set IMPRINT_LOCAL_EMBED=1 + install transformers.js for hybrid semantic)"}`,
         `Pending upload: ${stats.dirty} · pending deletions: ${stats.pendingDeletes}`,
         `Last cloud sync: ${cfg.lastSyncAt || "never"}`,
         USER_ID

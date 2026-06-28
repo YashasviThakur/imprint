@@ -27,8 +27,12 @@ it off and nothing ever leaves your machine.
   `IMPRINT_ENCRYPTION_KEY` (scrypt-derived key, per-file salt+IV, auto-migration;
   refuses to read on a wrong/missing key rather than risk data loss).
 - **On-device semantic search (optional)** — `IMPRINT_LOCAL_EMBED` enables
-  transformers.js + `all-MiniLM-L6-v2` (CPU, no API key); keyword search remains
-  the fallback. Cloud (Jina) semantic search is still used in hybrid mode online.
+  transformers.js + `all-MiniLM-L6-v2` (CPU, no API key). Cloud (Jina) semantic
+  search is still used in hybrid mode online.
+- **Hybrid retrieval** — local search now uses BM25-lite lexical ranking
+  (IDF-weighted, length-normalized) fused with embedding similarity via Reciprocal
+  Rank Fusion. BM25 is the default even without embeddings (much better than naive
+  keyword overlap); embeddings fuse in when enabled.
 - **Test suite** — `cd mcp && npm test` (58 assertions: concurrency, encryption,
   tombstones, bidirectional edit sync), plus validation end-to-end against the
   live API.

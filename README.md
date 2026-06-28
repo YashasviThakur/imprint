@@ -365,7 +365,7 @@ cd mcp && npm i @huggingface/transformers   # or @xenova/transformers
 export IMPRINT_LOCAL_EMBED=1                  # (Windows PowerShell: $env:IMPRINT_LOCAL_EMBED=1)
 ```
 
-A small sentence-transformer (`all-MiniLM-L6-v2`, ~25 MB) downloads once into `~/.imprint/models` and runs on CPU. Memories are embedded and cached locally; queries are matched by cosine similarity, so *"what frameworks do I like"* finds *"prefers TypeScript and Next.js"* even with no shared words. Keyword search remains the fallback if the library/model isn't present. Check the active mode anytime with the `sync_status` tool. In hybrid mode, cloud (Jina) semantic search is used when online.
+A small sentence-transformer (`all-MiniLM-L6-v2`, ~25 MB) downloads once into `~/.imprint/models` and runs on CPU. Local retrieval is **hybrid**: a BM25-lite lexical ranker (IDF-weighted, length-normalized) is fused with embedding cosine similarity via **Reciprocal Rank Fusion**, so a result that matches both your wording *and* your meaning wins — *"what frameworks do I like"* finds *"prefers TypeScript and Next.js"* even with no shared words. Without the flag, retrieval is still BM25 (much better than naive keyword match), and embeddings simply fuse in when enabled. Check the active mode anytime with the `sync_status` tool. In cloud-sync mode, Jina semantic search is used when online.
 
 ### Optional: encryption at rest
 
