@@ -3,6 +3,7 @@ import { getMemories, saveMemory, searchMemories, deleteMemory, updateMemory, ge
 import { extractMemories, ExtractedMemory } from "@/lib/extract";
 import { detectSemanticContradictions } from "@/lib/contradiction";
 import { rankMemories } from "@/lib/rank";
+import { getMemoryPool, invalidateMemoryPool } from "@/lib/pool";
 import { embed, cosineSimilarity } from "@/lib/embeddings";
 import { optimizeContext } from "@/lib/context-optimizer";
 import type { Memory } from "@/lib/dynamodb";
@@ -28,6 +29,22 @@ const GENERIC_PREFIX = /^(completed|next|next up|decided|decision|blocked|fixed|
 // A project is auto-created only once this many memories share its name — so a
 // stray mention never spawns a project, but a topic you work on a lot becomes one.
 const PROJECT_THRESHOLD = 50;
+
+// Guard against the classifier dumping a technical fact into "health" (e.g. a
+// "cookie persistence" bug is not a medical condition). If a health-tagged fact
+// reads as technical and shows no medical signal, route it to "general" instead.
+const TECH_RE = /\b(cookie|session|cache|token|auth|oauth|api|endpoint|server|serverless|database|dynamodb|sql|deploy|vercel|netlify|frontend|backend|css|html|json|javascript|typescript|react|vue|next\.?js|node|lambda|bug|error|crash|timeout|build|commit|repo|git|mcp|embedding|persistence|localstorage|cors|webhook|render|hydration)\b/i;
+const MEDICAL_RE = /\b(diabet|health|sleep|diet|fitness|workout|exercise|allerg|medication|medicine|doctor|hospital|pain|anxiety|depress|blood|sugar|weight|injury|disease|illness|condition|symptom|therapy|nutrition|wellbeing|mental|insulin|cholesterol)\b/i;
+function sanitizeTopic(content: string, topic: string): Topic {
+  if (topic === "health" && TECH_RE.test(content) && !MEDICAL_RE.test(content)) return "general";
+  return topic as Topic;
+}
+
+// How many existing memories to pull into the contradiction-detection pool.
+// Detection ranks this pool by embedding similarity, so it must be wide enough
+// to actually contain the fact being contradicted. The old paths fetched only
+// 100–500 newest rows, so older conflicting facts were never even loaded.
+const CONTRADICTION_POOL = 1000;
 async function autoTagProject(userId: string, content: string, topic: string, existing: { content?: string }[]): Promise<string[]> {
   if (topic !== "projects") return [];
   try {
@@ -168,8 +185,10 @@ export async function POST(req: NextRequest) {
         try { embedding = await embed(content, process.env.JINA_API_KEY, "retrieval.passage"); } catch {}
       }
 
-      // Dedup so repeated saves of the same fact don't pollute retrieval.
-      const existing = await getMemories(userId, undefined, 500);
+      // Fetch a wide pool once — reused for dedup, contradiction ranking, and
+      // auto-tagging. Detection ranks this pool by embedding similarity, so it
+      // must be broad enough to contain the fact being contradicted.
+      const existing = await getMemoryPool(userId, CONTRADICTION_POOL);
       const norm = (s: string) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
       const newPrefix = norm(content).slice(0, 40);
       let dup = existing.find(e => norm(e.content).slice(0, 40) === newPrefix);
@@ -182,21 +201,23 @@ export async function POST(req: NextRequest) {
         if (pinned && !dup.pinned) {
           try { await updateMemory(userId, dup.memoryId, dup.createdAt, { pinned: true }); dup.pinned = true; } catch {}
         }
-        return NextResponse.json({ memory: dup, deduped: true });
+        return NextResponse.json({ memory: lite([dup])[0], deduped: true });
       }
 
-      // Real-time contradiction detection — flag facts that conflict with what we
-      // already know (runs on every save path: MCP, stop-hook, dashboard).
-      const memTopic = topic || "general";
+      // Real-time contradiction detection — semantically ranks the whole pool and
+      // LLM-checks the most similar facts (runs on every save path).
+      const memTopic = sanitizeTopic(content, topic || "general");
       const groqKey = groqApiKey || process.env.GROQ_API_KEY;
       const contradictions = groqKey
         ? await detectSemanticContradictions(
-            [{ content, topic: memTopic }],
-            existing.map(e => ({ memoryId: e.memoryId, content: e.content, topic: e.topic })),
+            [{ content, topic: memTopic, embedding, clientId: "new" }],
+            existing,
             groqKey
           )
         : [];
       const contradictIds = contradictions.map(c => c.existingMemoryId);
+      const reasonsForNew: Record<string, string> = {};
+      for (const c of contradictions) reasonsForNew[c.existingMemoryId] = c.explanation;
 
       // Auto-group project memories under the matching (or a new) custom project.
       const tags = await autoTagProject(userId, content, memTopic, existing);
@@ -208,13 +229,15 @@ export async function POST(req: NextRequest) {
         keywords: content.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3).slice(0, 6),
         pinned: pinned || false,
         contradicts: contradictIds,
+        conflictReasons: reasonsForNew,
         confidence: 1.0,
         source: source || "mcp",
         embedding,
         tags,
       });
 
-      // Flag the conflicting memories back (bi-directional) so both surface a badge.
+      // Flag the conflicting memories back (bi-directional), carrying the reason
+      // so both sides can explain the conflict.
       if (contradictIds.length) {
         await Promise.all(
           existing
@@ -222,12 +245,14 @@ export async function POST(req: NextRequest) {
             .map(e =>
               updateMemory(userId, e.memoryId, e.createdAt, {
                 contradicts: Array.from(new Set([...(e.contradicts || []), memory.memoryId])),
+                conflictReasons: { ...(e.conflictReasons || {}), [memory.memoryId]: reasonsForNew[e.memoryId] || "" },
               }).catch(() => {})
             )
         );
       }
 
-      return NextResponse.json({ memory, contradictions });
+      invalidateMemoryPool(userId);
+      return NextResponse.json({ memory: lite([memory])[0], contradictions });
     }
 
     // Extraction from a batch of conversation messages
@@ -237,36 +262,73 @@ export async function POST(req: NextRequest) {
     const extracted = await extractMemories(messages, key);
     if (!extracted.length) return NextResponse.json({ memories: [], contradictions: [] });
 
-    const existing = await getMemories(userId, undefined, 100);
+    const existing = await getMemories(userId, undefined, CONTRADICTION_POOL);
+
+    // Dedup BEFORE detection so an identical re-extraction never reaches the LLM
+    // and never ranks its own stored twin as a "contradiction".
+    const existingSet = new Set(existing.map((e: any) => e.content?.toLowerCase().slice(0, 40)));
+    const toSave = extracted.filter(m => !existingSet.has(m.content.toLowerCase().slice(0, 40)));
+    if (!toSave.length) return NextResponse.json({ memories: [], contradictions: [] });
+
+    // Embed everything up front so detection can rank semantically (and so we
+    // don't embed twice). Each new memory gets a stable clientId for mapping hits.
+    const embeddings = await Promise.all(
+      toSave.map(async m => {
+        if (!process.env.JINA_API_KEY) return undefined;
+        try { return await embed(m.content, process.env.JINA_API_KEY, "retrieval.passage"); } catch { return undefined; }
+      })
+    );
+    const newMems = toSave.map((m, i) => ({ content: m.content, topic: m.topic, embedding: embeddings[i], clientId: String(i) }));
 
     // Semantic contradiction detection via Groq
     const contradictions = key
-      ? await detectSemanticContradictions(extracted, existing, key)
+      ? await detectSemanticContradictions(newMems, existing, key)
       : [];
 
-    const existingSet = new Set(existing.map((e: any) => e.content?.toLowerCase().slice(0, 40)));
-    const toSave = extracted.filter(m => !existingSet.has(m.content.toLowerCase().slice(0, 40)));
-
     const saved = await Promise.all(
-      toSave.map(async m => {
-        let embedding: number[] | undefined;
-        if (process.env.JINA_API_KEY) {
-          try { embedding = await embed(m.content, process.env.JINA_API_KEY, "retrieval.passage"); } catch {}
-        }
-        return saveMemory({
-          userId, content: m.content, topic: m.topic,
+      toSave.map((m, i) =>
+        saveMemory({
+          userId, content: m.content, topic: sanitizeTopic(m.content, m.topic),
           keywords: m.keywords, pinned: false,
-          contradicts: contradictions
-            .filter(c => c.newMemoryContent === m.content)
-            .map(c => c.existingMemoryId),
+          contradicts: contradictions.filter(c => c.newMemoryClientId === String(i)).map(c => c.existingMemoryId),
+          conflictReasons: contradictions
+            .filter(c => c.newMemoryClientId === String(i))
+            .reduce((acc, c) => { acc[c.existingMemoryId] = c.explanation; return acc; }, {} as Record<string, string>),
           confidence: m.confidence,
           source: source || "web",
-          embedding,
-        });
-      })
+          embedding: embeddings[i],
+        })
+      )
     );
 
-    return NextResponse.json({ memories: saved, contradictions });
+    // Bi-directional flagging for the batch path too: point each conflicting
+    // existing memory back at the new memory that contradicted it (with reason).
+    if (contradictions.length) {
+      const savedByClient = new Map(toSave.map((_, i) => [String(i), saved[i]]));
+      const existingById = new Map(existing.map(e => [e.memoryId, e]));
+      const backRefs = new Map<string, { ids: Set<string>; reasons: Record<string, string> }>();
+      for (const c of contradictions) {
+        const newSaved = savedByClient.get(c.newMemoryClientId || "");
+        if (!newSaved) continue;
+        if (!backRefs.has(c.existingMemoryId)) backRefs.set(c.existingMemoryId, { ids: new Set(), reasons: {} });
+        const ref = backRefs.get(c.existingMemoryId)!;
+        ref.ids.add(newSaved.memoryId);
+        ref.reasons[newSaved.memoryId] = c.explanation;
+      }
+      await Promise.all(
+        [...backRefs.entries()].map(([eid, ref]) => {
+          const e = existingById.get(eid);
+          if (!e) return Promise.resolve();
+          return updateMemory(userId, eid, e.createdAt, {
+            contradicts: Array.from(new Set([...(e.contradicts || []), ...ref.ids])),
+            conflictReasons: { ...(e.conflictReasons || {}), ...ref.reasons },
+          }).catch(() => {});
+        })
+      );
+    }
+
+    invalidateMemoryPool(userId);
+    return NextResponse.json({ memories: lite(saved), contradictions });
   } catch (err) {
     console.error("POST /api/memories error:", err);
     return NextResponse.json({ error: "Failed to save memories" }, { status: 500 });
@@ -286,6 +348,7 @@ export async function PATCH(req: NextRequest) {
     if (topic !== undefined) updates.topic = topic;
     if (tags !== undefined) updates.tags = tags;
     await updateMemory(userId, memoryId, createdAt, updates);
+    invalidateMemoryPool(userId);
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("PATCH /api/memories error:", err);
@@ -303,6 +366,7 @@ export async function DELETE(req: NextRequest) {
   }
   try {
     await deleteMemory(userId, memoryId, createdAt);
+    invalidateMemoryPool(userId);
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("DELETE /api/memories error:", err);

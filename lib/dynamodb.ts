@@ -46,6 +46,9 @@ export interface Memory {
   ttl?: number;
   pinned: boolean;
   contradicts: string[];
+  // Human-readable "why" for each conflict, keyed by the partner memory's id.
+  // Populated alongside contradicts[] so the dashboard can explain a conflict.
+  conflictReasons?: Record<string, string>;
   confidence: number;
   accessCount?: number;
   embedding?: number[];
@@ -64,6 +67,11 @@ export interface User {
   // Cloud sync toggle for the local-first MCP client. Default ON; when the user
   // turns it off, the local server stops mirroring memories to DynamoDB.
   syncEnabled?: boolean;
+  // Editable profile (overrides the Google-provided session values in the UI).
+  name?: string;
+  image?: string;       // avatar URL or a small data: URL
+  age?: string;         // free-form so it can be left blank
+  role?: string;
 }
 
 // Memory Rules — user controls what gets auto-saved
@@ -168,6 +176,7 @@ export async function getMemories(
     ttl: item.ttl,
     pinned: item.pinned,
     contradicts: item.contradicts,
+    conflictReasons: item.conflictReasons,
     confidence: item.confidence,
     accessCount: item.accessCount ?? 0,
     embedding: item.embedding,
@@ -210,7 +219,7 @@ export async function updateMemory(
   userId: string,
   memoryId: string,
   createdAt: string,
-  updates: Partial<Pick<Memory, "content" | "pinned" | "topic" | "contradicts" | "tags">>
+  updates: Partial<Pick<Memory, "content" | "pinned" | "topic" | "contradicts" | "conflictReasons" | "tags">>
 ): Promise<void> {
   const sets: string[] = [];
   const removes: string[] = [];
@@ -243,6 +252,10 @@ export async function updateMemory(
   if (updates.contradicts !== undefined) {
     sets.push("contradicts = :contradicts");
     values[":contradicts"] = updates.contradicts;
+  }
+  if (updates.conflictReasons !== undefined) {
+    sets.push("conflictReasons = :conflictReasons");
+    values[":conflictReasons"] = updates.conflictReasons;
   }
   if (updates.tags !== undefined) {
     sets.push("tags = :tags");
@@ -375,6 +388,35 @@ export async function setSyncEnabled(userId: string, enabled: boolean): Promise<
   );
 }
 
+// Update the editable profile fields (name / image / age / role). Only the keys present
+// in `profile` are written. `name` is a DynamoDB reserved word, so every field
+// goes through an ExpressionAttributeNames placeholder to stay safe.
+export async function updateUserProfile(
+  userId: string,
+  profile: { name?: string; image?: string; age?: string; role?: string }
+): Promise<void> {
+  const sets: string[] = [];
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  for (const key of ["name", "image", "age", "role"] as const) {
+    const v = profile[key];
+    if (v === undefined) continue;
+    sets.push(`#${key} = :${key}`);
+    names[`#${key}`] = key;
+    values[`:${key}`] = v;
+  }
+  if (sets.length === 0) return;
+  await ddb.send(
+    new UpdateCommand({
+      TableName: USERS_TABLE,
+      Key: { PK: `USER#${userId}`, SK: "PROFILE" },
+      UpdateExpression: "SET " + sets.join(", "),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    })
+  );
+}
+
 // ── Memory Rules ─────────────────────────────────────────
 
 const DEFAULT_RULES: Omit<MemoryRule, "ruleId" | "createdAt">[] = [
@@ -383,9 +425,9 @@ const DEFAULT_RULES: Omit<MemoryRule, "ruleId" | "createdAt">[] = [
   { label: "Tech stack & tools",       topic: "preferences", enabled: true, keywords: ["using", "stack", "framework", "language", "tool"] },
   { label: "Preferences & dislikes",   topic: "preferences", enabled: true, keywords: ["prefer", "love", "hate", "like", "dislike", "always use"] },
   { label: "Work & job",               topic: "work", enabled: true, keywords: ["job", "company", "employer", "role", "position", "working at"] },
-  { label: "Personal & location",      topic: "personal", enabled: false, keywords: ["from", "live in", "based in", "my name"] },
-  { label: "Health & wellbeing",       topic: "health", enabled: false, keywords: ["health", "sleep", "diet", "workout", "feeling"] },
-  { label: "Relationships",            topic: "relationships", enabled: false, keywords: ["friend", "partner", "family", "colleague", "team"] },
+  { label: "Personal & location",      topic: "personal", enabled: true, keywords: ["from", "live in", "based in", "my name"] },
+  { label: "Health & wellbeing",       topic: "health", enabled: true, keywords: ["health", "sleep", "diet", "workout", "feeling", "diabetes", "condition", "diagnosed", "medication", "allergy"] },
+  { label: "Relationships",            topic: "relationships", enabled: true, keywords: ["friend", "partner", "family", "colleague", "team"] },
 ];
 
 export async function getMemoryRules(userId: string): Promise<MemoryPreferences> {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { updateMemory, deleteMemory, Topic } from "@/lib/dynamodb";
+import { requireOwner } from "@/lib/authz";
 
 interface Params {
   params: Promise<{ id: string }>;
@@ -9,7 +10,7 @@ interface Params {
 export async function PATCH(req: NextRequest, { params }: Params) {
   const { id: memoryId } = await params;
   const body = await req.json();
-  const { userId, createdAt, content, pinned, topic } = body;
+  const { userId, createdAt, content, pinned, topic, tags, contradicts, conflictReasons } = body;
 
   if (!userId || !createdAt) {
     return NextResponse.json(
@@ -17,12 +18,17 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       { status: 400 }
     );
   }
+  const denied = await requireOwner(userId);
+  if (denied) return denied;
 
   try {
     await updateMemory(userId, memoryId, createdAt, {
       ...(content !== undefined && { content }),
       ...(pinned !== undefined && { pinned }),
       ...(topic !== undefined && { topic: topic as Topic }),
+      ...(tags !== undefined && { tags }),
+      ...(contradicts !== undefined && { contradicts }),
+      ...(conflictReasons !== undefined && { conflictReasons }),
     });
     return NextResponse.json({ success: true });
   } catch (err) {
@@ -42,6 +48,8 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       { status: 400 }
     );
   }
+  const denied = await requireOwner(userId);
+  if (denied) return denied;
 
   try {
     await deleteMemory(userId, memoryId, createdAt);
