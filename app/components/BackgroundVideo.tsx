@@ -68,13 +68,26 @@ export default function BackgroundVideo({ overlayOpacity = 0.55 }: BackgroundVid
       animId = requestAnimationFrame(step);
     }
 
-    function startVideo() {
-      // Fade-in is driven by the "playing" event, not this promise — a
-      // programmatic play() can be rejected by autoplay policy even when muted.
-      video!.play().catch(() => {});
-    }
+    const tryPlay = () => { video.play().catch(() => {}); };
 
-    const onPlaying = () => animateFade(1, 400);
+    // Reveal as soon as the first frame is decodable — do NOT gate visibility
+    // solely on the "playing" event. Chrome can refuse muted autoplay for an
+    // element that's effectively invisible (opacity:0), which left the video
+    // hidden forever: no autoplay → no "playing" → opacity stuck at 0 (the bug).
+    // Showing the first frame/poster also gives a graceful fallback if a browser
+    // blocks autoplay entirely.
+    // Reveal by setting opacity directly and letting the element's own CSS
+    // `transition: opacity` animate it. Don't use the rAF fade here: rAF is
+    // throttled in background tabs, which would leave the video invisible until
+    // the tab is focused. Setting the property applies regardless.
+    const reveal = () => {
+      if (animId) { cancelAnimationFrame(animId); animId = null; }
+      video.style.transition = "opacity 0.6s ease";
+      video.style.opacity = "1";
+    };
+
+    const onLoaded = () => { reveal(); tryPlay(); };
+    const onPlaying = () => reveal();
 
     const onTimeUpdate = () => {
       const rem = video.duration - video.currentTime;
@@ -88,19 +101,37 @@ export default function BackgroundVideo({ overlayOpacity = 0.55 }: BackgroundVid
       video.style.opacity = "0";
       loopTimer = setTimeout(() => {
         video.currentTime = 0;
-        startVideo();
+        reveal();
+        tryPlay();
       }, 100);
     };
 
-    startVideo();
+    // If autoplay was blocked, resume on the first user gesture or when the tab
+    // becomes visible again.
+    const onGesture = () => tryPlay();
+    const onVisible = () => { if (!document.hidden) tryPlay(); };
+
+    video.addEventListener("loadeddata", onLoaded);
+    video.addEventListener("canplay", tryPlay);
     video.addEventListener("playing", onPlaying);
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("ended", onEnded);
+    window.addEventListener("pointerdown", onGesture, { once: true });
+    document.addEventListener("visibilitychange", onVisible);
+
+    // Cover the case where the asset is already buffered (cached) before the
+    // listeners attached: reveal + play right away.
+    if (video.readyState >= 2) onLoaded();
+    tryPlay();
 
     return () => {
+      video.removeEventListener("loadeddata", onLoaded);
+      video.removeEventListener("canplay", tryPlay);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("timeupdate", onTimeUpdate);
       video.removeEventListener("ended", onEnded);
+      window.removeEventListener("pointerdown", onGesture);
+      document.removeEventListener("visibilitychange", onVisible);
       if (animId) cancelAnimationFrame(animId);
       if (loopTimer) clearTimeout(loopTimer);
     };
