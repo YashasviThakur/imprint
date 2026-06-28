@@ -6,6 +6,8 @@ Imprint gives AI coding assistants a persistent memory that survives across ever
 
 🔗 **Live:** [imprint-ebon.vercel.app](https://imprint-ebon.vercel.app)
 
+> **🆕 What's new in 0.3 — Hybrid, local-first.** Memories now live on your machine (`~/.imprint`) and work fully offline with no account; cloud sync is an optional, per-user toggle (off = nothing leaves your computer). Bidirectional sync (edits, pins, and deletes propagate and stick), optional at-rest encryption, optional on-device semantic search, and new `update_memory` / `sync_status` tools. See the [changelog](CHANGELOG.md).
+
 ---
 
 ## The Problem
