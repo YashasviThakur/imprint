@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOrCreateUser, updateUserApiKey, updateUserProfile } from "@/lib/dynamodb";
+import { getOrCreateUser, updateUserApiKey, setSyncEnabled, updateUserProfile } from "@/lib/dynamodb";
 import { encryptApiKey } from "@/lib/crypto";
 import { requireOwner } from "@/lib/authz";
 
@@ -21,6 +21,7 @@ export async function GET(req: NextRequest) {
       messageCount: user.messageCount,
       resetDate: user.resetDate,
       hasApiKey: !!user.encryptedApiKey,
+      syncEnabled: user.syncEnabled !== false, // default ON
       name: user.name ?? null,
       image: user.image ?? null,
       age: user.age ?? null,
@@ -33,10 +34,11 @@ export async function GET(req: NextRequest) {
 }
 
 // PATCH /api/user — update editable profile fields (name / image / age / role)
+// and/or the cloud-sync toggle (syncEnabled).
 export async function PATCH(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
-  const { userId, name, image, age, role } = body as {
-    userId?: string; name?: string; image?: string; age?: string; role?: string;
+  const { userId, name, image, age, role, syncEnabled } = body as {
+    userId?: string; name?: string; image?: string; age?: string; role?: string; syncEnabled?: boolean;
   };
 
   if (!userId) {
@@ -70,6 +72,8 @@ export async function PATCH(req: NextRequest) {
       ...(age !== undefined ? { age } : {}),
       ...(role !== undefined ? { role } : {}),
     });
+    // Cloud-sync toggle (local-first MCP client reads this).
+    if (typeof syncEnabled === "boolean") await setSyncEnabled(userId, syncEnabled);
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error("PATCH /api/user error:", err);

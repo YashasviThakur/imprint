@@ -64,6 +64,9 @@ export interface User {
   resetDate: string;
   orgId?: string;       // set when user belongs to an org
   orgRole?: "admin" | "member";
+  // Cloud sync toggle for the local-first MCP client. Default ON; when the user
+  // turns it off, the local server stops mirroring memories to DynamoDB.
+  syncEnabled?: boolean;
   // Editable profile (overrides the Google-provided session values in the UI).
   name?: string;
   image?: string;       // avatar URL or a small data: URL
@@ -343,6 +346,7 @@ export async function getOrCreateUser(userId: string): Promise<User> {
     tier: "free",
     messageCount: 0,
     resetDate: today,
+    syncEnabled: true,
   };
 
   await ddb.send(
@@ -366,6 +370,20 @@ export async function updateUserApiKey(
       UpdateExpression: "SET encryptedApiKey = :key, #tier = :tier",
       ExpressionAttributeValues: { ":key": encryptedKey, ":tier": "byok" },
       ExpressionAttributeNames: { "#tier": "tier" },
+    })
+  );
+}
+
+// Cloud sync toggle — the local-first MCP client reads this to decide whether to
+// mirror memories to DynamoDB. Ensures the user row exists first.
+export async function setSyncEnabled(userId: string, enabled: boolean): Promise<void> {
+  await getOrCreateUser(userId);
+  await ddb.send(
+    new UpdateCommand({
+      TableName: USERS_TABLE,
+      Key: { PK: `USER#${userId}`, SK: "PROFILE" },
+      UpdateExpression: "SET syncEnabled = :enabled",
+      ExpressionAttributeValues: { ":enabled": enabled },
     })
   );
 }

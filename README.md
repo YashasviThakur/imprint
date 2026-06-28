@@ -2,9 +2,11 @@
 
 > Your AI coding assistant finally remembers you — across every IDE you use.
 
-Imprint gives AI coding assistants a persistent memory that survives across every session. Work naturally — Imprint silently extracts the durable facts, stores them in the cloud, and injects the relevant ones back into your next session. A fact you teach in one IDE is instantly available in the others.
+Imprint gives AI coding assistants a persistent memory that survives across every session. Work naturally — Imprint silently extracts the durable facts, **stores them locally on your machine** (working offline, no account required), and injects the relevant ones back into your next session. Opt into cloud sync and a fact you teach in one IDE becomes available in the others; leave it off and nothing ever leaves your computer.
 
 🔗 **Live:** [imprint-ebon.vercel.app](https://imprint-ebon.vercel.app)
+
+> **🆕 What's new in 0.3 — Hybrid, local-first.** Memories now live on your machine (`~/.imprint`) and work fully offline with no account; cloud sync is an optional, per-user toggle (off = nothing leaves your computer). Bidirectional sync (edits, pins, and deletes propagate and stick), optional at-rest encryption, optional on-device semantic search, and new `update_memory` / `sync_status` tools. See the [changelog](CHANGELOG.md).
 
 ---
 
@@ -98,7 +100,7 @@ Imprint fixes that permanently — and across **every** IDE, not just one.
 | **Setup** | One CLI command | Invite link |
 | **Target** | Developers, researchers | Teams, agencies |
 
-**The insight:** most memory tools serve one audience and one tool. Imprint scales from a solo developer to an enterprise team — and spans every MCP-capable IDE — on the same DynamoDB backend, zero migration.
+**The insight:** most memory tools serve one audience and one tool. Imprint scales from a solo developer to an enterprise team — and spans every MCP-capable IDE — on a **local-first store that optionally syncs to one shared DynamoDB backend**, zero migration. Run it 100% locally, or flip on sync for backup and cross-device/team memory.
 
 ---
 
@@ -137,13 +139,17 @@ You work in your AI IDE
        ↓
 Imprint silently extracts facts (Groq LLM + regex fallback)
        ↓
-Facts stored in DynamoDB:
+Facts stored LOCALLY first:  ~/.imprint/memories.json   (works offline, no account)
+       ↓
+If cloud sync is ON, mirrored to DynamoDB:
   Personal:   USER#userId    → MEMORY#timestamp
   Enterprise: USER#org_orgId → MEMORY#timestamp  (shared with the whole team)
        ↓
 Next session: get_memories() fires automatically
 Your assistant already knows you — and your team's context
 ```
+
+**Hybrid by design.** The local JSON store is the source of truth on each machine, so Imprint is instant and works with no network. A per-user **cloud-sync toggle** (dashboard → "Sync on / Local only") controls whether memories are also mirrored to DynamoDB for backup and cross-device/team sync. Turn it off and nothing ever leaves your computer.
 
 ---
 
@@ -154,20 +160,22 @@ flowchart TB
   subgraph SURF["Surfaces"]
     direction LR
     IDE["AI coding agents<br/>Claude Code · Cursor · Codex · Antigravity"]
-    DASH["Dashboard<br/>memory graph · analytics · rules"]
+    DASH["Dashboard<br/>graph · analytics · rules · sync toggle"]
     ORG["Enterprise<br/>shared org pool · BYOK"]
   end
 
-  subgraph CAP["Capture"]
+  subgraph CAP["Capture — on your machine"]
     direction LR
     MCP["MCP server<br/>tools · stdio"]
-    HOOK["Stop + PreCompact hooks<br/>guaranteed Groq extraction"]
+    HOOK["Stop + PreCompact hooks<br/>Groq extraction"]
   end
+
+  LOCAL[("Local store — ~/.imprint<br/>source of truth · offline<br/>cross-process lock · optional AES-256<br/>optional on-device embeddings")]
 
   subgraph API["API — Next.js on Vercel"]
     direction LR
     MEM["/api/memories<br/>save · search · pin · dedup · contradiction-check"]
-    SESS["/api/sessions · rules · org"]
+    SESS["/api/user · sessions · rules · org"]
     AUTH["NextAuth<br/>Google OAuth"]
   end
 
@@ -180,31 +188,28 @@ flowchart TB
 
   DB[("DynamoDB — single table<br/>USER#id · MEMORY#ts · TTL")]
 
-  IDE --> MCP
-  IDE --> HOOK
+  IDE --> MCP --> LOCAL
+  IDE --> HOOK --> LOCAL
+  LOCAL <-->|"sync ON only · bidirectional<br/>saves · edits · pins · deletes"| MEM
   DASH --> MEM
   ORG --> MEM
-  MCP --> MEM
-  HOOK --> MEM
   MEM --> AUTH
   MEM --> GROQ
   MEM --> JINA
   MEM --> RANK
-  GROQ --> DB
-  JINA --> DB
-  RANK --> DB
   MEM --> DB
 ```
 
-*Data flows **down** to save (write path) and **up** to retrieve (read path). Every surface reads and writes the same store.*
+*Reads and writes hit the **local store first** (instant, offline). When the per-user sync toggle is on, the local store and DynamoDB reconcile **bidirectionally**; when it's off, the cloud is never contacted.*
 
-**The five layers**
+**The layers**
 
-1. **Surfaces** — Claude Code, Cursor, Codex, Antigravity (and any MCP-capable IDE), plus the web dashboard and an enterprise org pool.
-2. **Capture** — the MCP server (stdio tools) *and* a guaranteed Stop/PreCompact hook that runs Groq extraction even when the model forgets to call `save_memory`.
-3. **API** — Next.js on Vercel: `/api/memories` (save, search, pin, dedup, contradiction-check), `/api/sessions`, `/api/rules`, `/api/org`; NextAuth (Google OAuth).
-4. **Intelligence** — Groq (`llama-3.3-70b`) for extraction, contradiction detection, and zero-score rerank; Jina embeddings (1024-dim); relevance ranking with dedup and always-injected pinned facts.
-5. **Storage** — DynamoDB single-table; 30-day TTL on unpinned memories, no TTL on pinned.
+1. **Surfaces** — Claude Code, Cursor, Codex, Antigravity (and any MCP-capable IDE), plus the web dashboard (with the cloud-sync toggle) and an enterprise org pool.
+2. **Capture** — the MCP server (stdio tools) *and* a guaranteed Stop/PreCompact hook that runs Groq extraction even when the model forgets to call `save_memory`. Both write the local store first.
+3. **Local store** (`~/.imprint`) — the on-device source of truth: zero-dependency JSON, cross-process file lock (server + hook), dedup, TTL, pinned-first ranking, optional AES-256-GCM at rest, and optional on-device semantic search. Works fully offline with no account.
+4. **Sync** — when the per-user toggle is on, a best-effort engine reconciles the local store with the cloud **bidirectionally**: new memories, edits, pins, and deletes propagate both ways (cloud-id reconciliation + tombstones so deletes stick and never resurrect; pending local edits are never clobbered).
+5. **API + Intelligence** — Next.js on Vercel: `/api/memories`, `/api/user` (incl. the sync flag), `/api/sessions`, `/api/rules`, `/api/org`; NextAuth (Google OAuth). Groq for extraction/contradiction/rerank, Jina embeddings (1024-dim), relevance ranking with always-injected pinned facts.
+6. **Storage** — DynamoDB single-table; 30-day TTL on unpinned memories, no TTL on pinned.
 
 > Full diagrams, data flows, and the data model: see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -248,13 +253,14 @@ flowchart TB
 
 | Layer | Tech |
 |---|---|
+| Local store | Zero-dependency JSON at `~/.imprint` · cross-process lock · optional AES-256-GCM |
+| Sync | Best-effort bidirectional reconcile (tombstones + cloud-id reconciliation) |
+| Cloud database | AWS DynamoDB (single-table) — optional mirror, per-user toggle |
 | Frontend + Dashboard | Next.js 16 (App Router), Vercel |
 | Auth | NextAuth (Auth.js) — Google OAuth |
-| Database | AWS DynamoDB (single-table design) |
-| Memory Extraction | Groq API (llama-3.3-70b) + regex fallback |
-| Embeddings | Jina AI (1024-dim) — semantic retrieval |
+| Memory extraction | Groq API (llama-3.3-70b) + regex fallback |
+| Embeddings | Jina AI (1024-dim, cloud) · optional on-device all-MiniLM-L6-v2 (local) |
 | MCP Server | Node.js, @modelcontextprotocol/sdk |
-| Extraction (hook) | Groq API (llama-3.3-70b) + regex fallback |
 
 ---
 
@@ -265,7 +271,8 @@ flowchart TB
 | Claude Code / Desktop | ✅ Live | MCP server + Stop hook |
 | Cursor · Codex · Antigravity | ✅ Live | MCP server |
 | Dashboard | ✅ Live | Web app at /dashboard |
-| Any machine | ✅ Portable | Install MCP + same user ID |
+| Offline / no account | ✅ Local-first | MCP server alone — store in `~/.imprint` |
+| Cross-device / team | ✅ Optional | Turn on cloud sync + same user ID |
 
 ---
 
@@ -277,7 +284,7 @@ flowchart TB
 
 For **Claude Code** and any MCP-capable IDE. One-time setup, works on any machine.
 
-> **No AWS account needed.** The MCP connects to Imprint's hosted API — your memories are stored securely in our DynamoDB backend. Just set your own user ID and you're done.
+> **Local-first.** The MCP server stores your memories on your own machine (`~/.imprint/memories.json`) and works fully offline — **no account and no AWS needed**. Setting `IMPRINT_USER_ID` is **optional**: add it (and leave the sync toggle ON in the dashboard) to also back up and sync your memories to the cloud across devices. Flip the toggle OFF anytime and your data stays only on your computer.
 
 **Step 1 — Clone and install dependencies**
 ```bash
@@ -292,15 +299,15 @@ claude mcp add imprint --scope user -- node /absolute/path/to/imprint/mcp/server
 ```
 > Replace `/absolute/path/to/imprint` with your actual path, e.g. `C:/Users/you/Downloads/imprint`
 
-**Step 3 — Set your user ID**
+**Step 3 — (Optional) Set your user ID for cloud sync**
 
-Open `~/.claude.json` and add under `mcpServers.imprint.env`:
+Skip this for 100% local use. To back up and sync your memories to the cloud, open `~/.claude.json` and add under `mcpServers.imprint.env`:
 ```json
 {
   "IMPRINT_USER_ID": "your-unique-id"
 }
 ```
-> Use anything unique — your name, email, or a random string. This namespaces your memories so they're private to you.
+> Use anything unique — your name, email, or a random string. This namespaces your memories so they're private to you, and links this machine to the cloud-sync toggle in your dashboard. Without it, Imprint runs purely locally.
 
 **Step 4 — Add the Stop Hook** (auto-saves after every response + AFK session summaries)
 
@@ -441,8 +448,36 @@ All team members' sessions automatically receive both their personal memories **
 | `get_memories` | Fires at session start. Pass `query` = the user's first message for relevance-ranked results (semantic search) instead of just the most recent memories |
 | `save_memory` | Save a new fact (content, topic, keywords) — runs contradiction detection and warns on conflicts |
 | `search_memories` | Semantic search — call before answering any personal question, and on topic shifts |
-| `delete_memory` | Forget something permanently |
-| `pin_memory` | Mark as always-inject — never missed |
+| `delete_memory` | Forget something permanently — the deletion propagates to the cloud and is never resurrected by a later sync |
+| `update_memory` | Correct/rewrite a memory's content or topic in place — syncs as an edit (no duplicate) |
+| `pin_memory` | Mark as always-inject — never missed; pin/unpin changes sync to the cloud |
+| `summarize_session` | Save the key facts learned this session as memories |
+| `sync_status` | Report where memories live (local / hybrid), counts, pending uploads/deletions, and last sync |
+
+> **Local-first.** Every tool reads/writes the on-device store (`~/.imprint`) first, so it works offline. When cloud sync is on, changes mirror to DynamoDB **bidirectionally** — saves, deletes, and pins all propagate, with cross-process-safe writes shared by the server and the Stop hook. Run the MCP test suite with `cd mcp && npm test`.
+
+### Optional: on-device semantic search
+
+By default, **local** search (sync off / offline) is keyword-based — fast and zero-dependency. For meaning-based retrieval **without sending anything to the cloud**, enable on-device embeddings:
+
+```bash
+cd mcp && npm i @huggingface/transformers   # or @xenova/transformers
+export IMPRINT_LOCAL_EMBED=1                  # (Windows PowerShell: $env:IMPRINT_LOCAL_EMBED=1)
+```
+
+A small sentence-transformer (`all-MiniLM-L6-v2`, ~25 MB) downloads once into `~/.imprint/models` and runs on CPU. Local retrieval is **hybrid**: a BM25-lite lexical ranker (IDF-weighted, length-normalized) is fused with embedding cosine similarity via **Reciprocal Rank Fusion**, so a result that matches both your wording *and* your meaning wins — *"what frameworks do I like"* finds *"prefers TypeScript and Next.js"* even with no shared words. Without the flag, retrieval is still BM25 (much better than naive keyword match), and embeddings simply fuse in when enabled. Check the active mode anytime with the `sync_status` tool. In cloud-sync mode, Jina semantic search is used when online.
+
+### Optional: encryption at rest
+
+By default the local store is plaintext JSON. To encrypt the sensitive files (`memories.json`, `tombstones.json`) on disk with **AES-256-GCM**, set a passphrase:
+
+```bash
+export IMPRINT_ENCRYPTION_KEY="a long passphrase"   # PowerShell: $env:IMPRINT_ENCRYPTION_KEY="..."
+```
+
+The key is derived with scrypt; each file carries its own salt + IV. Existing plaintext files are migrated to encrypted on their next write. If the file is encrypted and the passphrase is missing or wrong, Imprint **refuses to read** rather than silently overwriting your data — keep the passphrase safe (there's no recovery).
+
+> **Note on sync.** The flag is read from the dashboard toggle and re-checked periodically, so flipping *Sync on / Local only* takes effect without restarting your IDE. Cloud sync is bidirectional and **convergent**: new memories, edits, pins, and deletes propagate both ways; a pending local edit is never clobbered by a pull. Encryption is local-only and doesn't change what the cloud stores.
 
 ---
 
