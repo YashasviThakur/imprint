@@ -4,6 +4,7 @@ import {
   PutCommand,
   GetCommand,
   QueryCommand,
+  ScanCommand,
   UpdateCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -72,6 +73,19 @@ export interface User {
   image?: string;       // avatar URL or a small data: URL
   age?: string;         // free-form so it can be left blank
   role?: string;
+  // Set once, when the profile row is first created — the signup timestamp.
+  // Pre-existing accounts created before this field was added won't have it.
+  createdAt?: string;
+  email?: string;       // captured from the Google session at first login
+  lastLoginAt?: string; // refreshed on each tracked login
+}
+
+// A single login event. Stored in USERS_TABLE as { PK: USER#<id>, SK: LOGIN#<iso> }
+// so a user's history is one cheap Query, and `type: "LOGIN"` lets us scan globally.
+export interface LoginEvent {
+  userId: string;
+  at: string;
+  email?: string | null;
 }
 
 // Memory Rules — user controls what gets auto-saved
@@ -328,7 +342,10 @@ export async function incrementAccessCount(
 
 // ── Users ────────────────────────────────────────────────
 
-export async function getOrCreateUser(userId: string): Promise<User> {
+export async function getOrCreateUser(
+  userId: string,
+  profile: { email?: string; name?: string; image?: string } = {}
+): Promise<User> {
   const result = await ddb.send(
     new GetCommand({
       TableName: USERS_TABLE,
@@ -340,13 +357,19 @@ export async function getOrCreateUser(userId: string): Promise<User> {
     return result.Item as User;
   }
 
-  const today = new Date().toISOString().split("T")[0];
+  const now = new Date().toISOString();
+  const today = now.split("T")[0];
   const newUser: User = {
     userId,
     tier: "free",
     messageCount: 0,
     resetDate: today,
     syncEnabled: true,
+    createdAt: now,
+    lastLoginAt: now,
+    ...(profile.email ? { email: profile.email } : {}),
+    ...(profile.name ? { name: profile.name } : {}),
+    ...(profile.image ? { image: profile.image } : {}),
   };
 
   await ddb.send(
@@ -357,6 +380,105 @@ export async function getOrCreateUser(userId: string): Promise<User> {
   );
 
   return newUser;
+}
+
+// ── Login tracking ───────────────────────────────────────
+// NextAuth uses a stateless JWT session here (no DB adapter), so logins aren't
+// persisted anywhere by default. This records each login as its own item, giving
+// a permanent, queryable history — going forward only. Throttled to one event
+// per user per 30 min so refreshes/re-mounts don't flood the table.
+const LOGIN_THROTTLE_MS = 30 * 60 * 1000;
+
+export async function recordLogin(
+  userId: string,
+  info: { email?: string; name?: string; image?: string } = {}
+): Promise<void> {
+  const now = new Date().toISOString();
+  // Ensures the profile row exists and backfills email/createdAt on first login.
+  const user = await getOrCreateUser(userId, info);
+
+  const last = user.lastLoginAt ? Date.parse(user.lastLoginAt) : 0;
+  const isNewSession = Date.now() - last > LOGIN_THROTTLE_MS;
+
+  if (isNewSession) {
+    await ddb.send(
+      new PutCommand({
+        TableName: USERS_TABLE,
+        Item: {
+          PK: `USER#${userId}`,
+          SK: `LOGIN#${now}`,
+          type: "LOGIN",
+          at: now,
+          email: info.email ?? user.email ?? null,
+        },
+      })
+    );
+  }
+
+  // Always refresh lastLoginAt (cheap); backfill email if we just learned it.
+  await ddb.send(
+    new UpdateCommand({
+      TableName: USERS_TABLE,
+      Key: { PK: `USER#${userId}`, SK: "PROFILE" },
+      UpdateExpression: info.email
+        ? "SET lastLoginAt = :now, #em = :email"
+        : "SET lastLoginAt = :now",
+      ...(info.email ? { ExpressionAttributeNames: { "#em": "email" } } : {}),
+      ExpressionAttributeValues: {
+        ":now": now,
+        ...(info.email ? { ":email": info.email } : {}),
+      },
+    })
+  );
+}
+
+// ── Admin stats ──────────────────────────────────────────
+// Full-table scans — fine at this scale (hundreds/thousands of items). If the
+// user base grows large, move these behind a GSI keyed by type/date.
+
+export async function listAllUsers(): Promise<User[]> {
+  const users: User[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb.send(
+      new ScanCommand({
+        TableName: USERS_TABLE,
+        FilterExpression: "SK = :p",
+        ExpressionAttributeValues: { ":p": "PROFILE" },
+        ExclusiveStartKey,
+      })
+    );
+    for (const it of r.Items ?? []) users.push(it as User);
+    ExclusiveStartKey = r.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return users;
+}
+
+export async function listRecentLogins(limit = 200): Promise<LoginEvent[]> {
+  const events: LoginEvent[] = [];
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb.send(
+      new ScanCommand({
+        TableName: USERS_TABLE,
+        FilterExpression: "#t = :t",
+        ExpressionAttributeNames: { "#t": "type" },
+        ExpressionAttributeValues: { ":t": "LOGIN" },
+        ExclusiveStartKey,
+      })
+    );
+    for (const it of r.Items ?? []) {
+      const pk = String(it.PK ?? "");
+      events.push({
+        userId: pk.replace("USER#", ""),
+        at: String(it.at ?? it.SK ?? ""),
+        email: (it.email as string | null) ?? null,
+      });
+    }
+    ExclusiveStartKey = r.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  events.sort((a, b) => b.at.localeCompare(a.at));
+  return events.slice(0, limit);
 }
 
 export async function updateUserApiKey(

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { SessionProvider } from "next-auth/react";
+import LoginTracker from "@/app/components/LoginTracker";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,7 +30,10 @@ export default function RootLayout({
         lang="en"
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <body>{children}</body>
+        <body>
+          <LoginTracker />
+          {children}
+        </body>
       </html>
     </SessionProvider>
   );
