@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireOwnerOrKey } from "@/lib/authz";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -23,6 +24,8 @@ const TABLE = process.env.DYNAMODB_MEMORIES_TABLE || "imprint-memories";
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get("userId");
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   try {
     const result = await client.send(
@@ -59,6 +62,8 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const { userId, title, messageCount = 0, memoriesExtracted = 0 } = body;
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   const sessionId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
@@ -93,6 +98,8 @@ export async function PATCH(req: NextRequest) {
   const body = await req.json();
   const { userId, sessionId, startedAt, pinned, title } = body;
   if (!userId || !sessionId || !startedAt) return NextResponse.json({ error: "userId, sessionId, startedAt required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   const updateParts: string[] = [];
   const values: Record<string, any> = {};

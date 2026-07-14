@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveMemory } from "@/lib/dynamodb";
 import { extractMemories } from "@/lib/extract";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
@@ -13,6 +14,9 @@ export async function POST(req: NextRequest) {
     if (!audio || !userId) {
       return NextResponse.json({ error: "audio and userId required" }, { status: 400 });
     }
+
+    const denied = await requireOwnerOrKey(req, userId);
+    if (denied) return denied;
 
     if (!GROQ_API_KEY) {
       return NextResponse.json({ error: "GROQ_API_KEY not set" }, { status: 500 });

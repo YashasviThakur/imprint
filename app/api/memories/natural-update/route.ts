@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMemories, updateMemory } from "@/lib/dynamodb";
 import { embed, cosineSimilarity } from "@/lib/embeddings";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 // POST /api/memories/natural-update
 // Body: { userId, instruction, groqApiKey? }
@@ -13,6 +14,8 @@ export async function POST(req: NextRequest) {
   if (!userId || !instruction?.trim()) {
     return NextResponse.json({ error: "userId and instruction required" }, { status: 400 });
   }
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   const groqKey = groqApiKey || process.env.GROQ_API_KEY;
   if (!groqKey) return NextResponse.json({ error: "Groq API key required" }, { status: 400 });

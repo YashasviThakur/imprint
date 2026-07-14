@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMemoryRules, saveMemoryRules, addMemoryRule, updateMemoryRule, deleteMemoryRule } from "@/lib/dynamodb";
+import { getMemoryRules, addMemoryRule, updateMemoryRule, deleteMemoryRule } from "@/lib/dynamodb";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 // GET /api/rules?userId=
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get("userId");
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   const prefs = await getMemoryRules(userId);
   return NextResponse.json(prefs);
 }
@@ -16,6 +19,8 @@ export async function POST(req: NextRequest) {
   if (!userId || !rule.label || !rule.topic) {
     return NextResponse.json({ error: "userId, label, topic required" }, { status: 400 });
   }
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   const newRule = await addMemoryRule(userId, { enabled: true, ...rule });
   return NextResponse.json({ rule: newRule });
 }
@@ -25,6 +30,8 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const { userId, ruleId, ...updates } = await req.json();
   if (!userId || !ruleId) return NextResponse.json({ error: "userId, ruleId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   await updateMemoryRule(userId, ruleId, updates);
   return NextResponse.json({ ok: true });
 }
@@ -34,6 +41,8 @@ export async function DELETE(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get("userId");
   const ruleId = req.nextUrl.searchParams.get("ruleId");
   if (!userId || !ruleId) return NextResponse.json({ error: "userId, ruleId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   await deleteMemoryRule(userId, ruleId);
   return NextResponse.json({ ok: true });
 }

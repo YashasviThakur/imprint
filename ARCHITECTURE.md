@@ -17,17 +17,18 @@ flowchart TB
     ORG["Enterprise<br/>shared org pool · BYOK"]
   end
 
-  subgraph CAP["Capture"]
+  subgraph CAP["Capture — local-first"]
     direction LR
-    MCP["MCP server<br/>5 tools · stdio"]
-    HOOK["Stop + PreCompact hooks<br/>guaranteed Groq extraction"]
+    MCP["MCP server<br/>8 tools · stdio"]
+    HOOK["Stop + PreCompact hooks<br/>guaranteed LLM extraction"]
+    LOCAL[("Local store<br/>~/.imprint — source of truth")]
   end
 
   subgraph API["API — Next.js on Vercel"]
     direction LR
     MEM["/api/memories<br/>save · search · pin · dedup"]
     SESS["/api/sessions · rules · org"]
-    AUTH["Clerk auth<br/>Google OAuth"]
+    AUTH["NextAuth (Google OAuth)<br/>or Bearer imp_live_ API key"]
   end
 
   subgraph INTEL["Intelligence"]
@@ -41,6 +42,9 @@ flowchart TB
 
   IDE --> MCP
   IDE --> HOOK
+  MCP --> LOCAL
+  HOOK --> LOCAL
+  LOCAL -. "optional sync (API key)" .-> MEM
   DASH --> MEM
   ORG --> MEM
   MCP --> MEM
@@ -66,22 +70,24 @@ flowchart TB
 - **Dashboard** — Next.js web app at `/dashboard`: live memory graph, source analytics, session history, and per-topic memory rules.
 - **Enterprise** — a shared org memory pool; every member's session receives personal **and** org memories. Bring-your-own Anthropic key, AES-256 encrypted.
 
-### 2. Capture — two layers, never loses a fact
-- **MCP server** (`mcp/server.js`, stdio) exposes five tools: `get_memories`, `save_memory`, `search_memories`, `delete_memory`, `pin_memory`. Tool descriptions instruct the agent to retrieve with `query` at session start and save proactively.
-- **Stop + PreCompact hooks** (`mcp/extract-and-save.js`) fire after every response and before context compaction, running Groq extraction so memories are captured **even when the model forgets to call `save_memory`**.
+### 2. Capture — local-first, two layers, never loses a fact
+- **Local store** (`mcp/local-store.js`) — memories live on your machine under `~/.imprint`, work fully offline with no account, and remain the source of truth. Cloud sync (`mcp/sync.js`) is an optional, per-user, bidirectional mirror.
+- **MCP server** (`mcp/server.js`, stdio) exposes eight tools: `get_memories`, `save_memory`, `search_memories`, `delete_memory`, `pin_memory`, `summarize_session`, `update_memory`, `sync_status`. Tool descriptions instruct the agent to retrieve with `query` at session start and save proactively.
+- **Stop + PreCompact hooks** (`mcp/extract-and-save.js`) fire after every response and before context compaction, running LLM extraction so memories are captured **even when the model forgets to call `save_memory`**.
 
 ### 3. API — Next.js on Vercel (serverless)
 - `/api/memories` — `GET` (semantic / keyword / optimize), `POST` (direct save + batch extraction), `PATCH` (pin / edit), `DELETE`.
 - `/api/sessions`, `/api/rules`, `/api/org`, `/api/user`, `/api/keys`.
-- **Clerk** authentication (Google OAuth); routes protected by middleware.
+- **NextAuth.js** authentication (Google OAuth) for the dashboard; MCP/sync/webhook callers authenticate with a revocable `imp_live_` API key (`Authorization: Bearer`). Every user-data route requires one of the two (`lib/authz.ts`).
 
 ### 4. Intelligence
-- **Groq** (`llama-3.3-70b`) extracts memories from conversation; `llama-3.1-8b-instant` reranks zero-score candidates during retrieval.
+- **Multi-provider LLM fallback** (`lib/llm.ts`) — extraction, contradiction detection and memory search fail over automatically across **Groq → Cerebras → Google Gemini**; a rate-limit on one provider transparently falls through to the next.
 - **Jina** embeds every memory at 1024 dimensions (`retrieval.passage` for stored facts, `retrieval.query` for searches).
 - **Ranking / dedup / pin** — pinned float to the top, recency decay (~14-day half-life), access boost; dedup on save (prefix + cosine > 0.92).
 
 ### 5. Storage
-- **DynamoDB single-table** design. Memories carry a 30-day TTL when unpinned; **pinned memories drop their TTL and are permanent**.
+- **Local JSON store** under `~/.imprint` (source of truth, optional at-rest encryption).
+- **DynamoDB single-table** cloud mirror when sync is on. Memories carry a 30-day TTL when unpinned; **pinned memories drop their TTL and are permanent**.
 
 ---
 
@@ -159,9 +165,10 @@ TTL: 30 days for unpinned memories, none for pinned.
 | Layer | Tech |
 |-------|------|
 | Frontend + Dashboard | Next.js 16 (App Router), Vercel |
-| Auth | Clerk (Google OAuth) |
-| Database | AWS DynamoDB (single-table) |
-| Memory extraction | Groq API (`llama-3.3-70b`) + regex fallback |
+| Auth | NextAuth.js (Google OAuth) + `imp_live_` API keys for MCP/sync |
+| Local store | JSON under `~/.imprint` (offline-capable source of truth) |
+| Database | AWS DynamoDB (single-table, optional cloud mirror) |
+| Memory extraction | Groq → Cerebras → Gemini fallback + regex fallback |
 | Embeddings / retrieval | Jina AI (1024-dim) |
 | MCP server | Node.js, `@modelcontextprotocol/sdk` |
 | Capture hooks | Groq API + regex fallback |
@@ -180,7 +187,10 @@ TTL: 30 days for unpinned memories, none for pinned.
 
 ## Security
 
-- Clerk authentication; API routes gated by middleware.
-- AES-256 encryption for stored API keys.
+- Every user-data API route requires either a NextAuth session that **owns** the `userId` or an `imp_live_` API key that resolves to it (`lib/authz.ts` — `requireOwner` / `requireOwnerOrKey`). A `userId` in the query string or body is never trusted on its own.
+- API keys are generated, viewed (masked) and revoked only by the signed-in owner; MCP, sync, stop-hook and webhook clients send them as `Authorization: Bearer`.
+- Share links are HMAC tokens derived from a server-side secret (`SHARE_SECRET`, no fallback) and compared in constant time; generating a link requires the owner's session.
+- Local-first privacy: with sync off, no memory content ever leaves the machine. Optional at-rest encryption for the local store; AES-256 encryption for stored provider keys.
 - Memory rules default privacy-first (personal / health / relationships off by default).
-- Memories namespaced per `userId`; org memories isolated under `ORG#orgId`.
+- Memories namespaced per `userId`; org memories isolated under `ORG#orgId`, member-gated; org membership changes are admin-only.
+- AI prompts treat stored memories as untrusted data — instructions hidden inside a memory are never followed.

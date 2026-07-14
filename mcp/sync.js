@@ -28,20 +28,28 @@ import {
   clearPinDirty,
   markSynced,
   saveConfig,
+  loadConfig,
   prefixOf,
 } from "./local-store.js";
 
 const enc = encodeURIComponent;
 
+// Cloud routes require auth: send the user's imp_live_ API key on every call.
+// Without a key the server rejects the request (sync stays local-only).
+function authHeaders() {
+  const key = process.env.IMPRINT_API_KEY || loadConfig().apiKey;
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
 async function apiGet(apiBase, path) {
-  const res = await fetch(`${apiBase}${path}`);
+  const res = await fetch(`${apiBase}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
 async function apiSend(apiBase, path, method, body) {
   const res = await fetch(`${apiBase}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error(`API ${res.status}`);

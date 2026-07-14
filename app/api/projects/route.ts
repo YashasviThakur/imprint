@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCustomProjects, saveCustomProjects } from "@/lib/dynamodb";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 // GET /api/projects?userId=  → { projects }
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get("userId");
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   try {
     const projects = await getCustomProjects(userId);
     return NextResponse.json({ projects });
@@ -18,6 +21,8 @@ export async function GET(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const { userId, projects } = await req.json();
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   try {
     await saveCustomProjects(userId, Array.isArray(projects) ? projects : []);
     return NextResponse.json({ success: true });
