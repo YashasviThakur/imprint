@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getUserIdFromApiKey } from "@/app/api/keys/route";
+import { getUserIdFromApiKey } from "@/lib/authz";
 import { ddb } from "@/lib/dynamodb";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
 
   const internal = await fetch(`${req.nextUrl.origin}/api/memories`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({ userId, content, topic, pinned, source: "mcp" }),
   });
   const data = await internal.json();

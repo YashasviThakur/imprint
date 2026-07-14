@@ -22,13 +22,20 @@ const CFG      = loadConfig();
 const USER_ID  = process.env.IMPRINT_USER_ID || CFG.userId || null;
 const HYBRID   = !!USER_ID && CFG.syncEnabled;
 const GROQ_KEY = process.env.GROQ_API_KEY;
+// Cloud routes require auth (session or imp_live_ key) — send the key on every
+// mirror call. Without it the server rejects and we stay local-only.
+const IMPRINT_KEY = process.env.IMPRINT_API_KEY || CFG.apiKey || null;
 
 const LAST_ACTIVITY_FILE = join(tmpdir(), `imprint-last-activity-${USER_ID}.json`);
 const AFK_THRESHOLD_MS   = 30 * 60 * 1000; // 30 minutes
 
 // ── API helpers ───────────────────────────────────────────
+function authHeaders() {
+  return IMPRINT_KEY ? { Authorization: `Bearer ${IMPRINT_KEY}` } : {};
+}
+
 async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json();
 }
@@ -36,7 +43,7 @@ async function apiGet(path) {
 async function apiPost(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`API ${res.status}`);

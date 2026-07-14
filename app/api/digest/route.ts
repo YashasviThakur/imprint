@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ddb } from "@/lib/dynamodb";
+import { requireOwnerOrKey } from "@/lib/authz";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 
 const TABLE = process.env.DYNAMODB_TABLE || "imprint-memories";
@@ -16,6 +17,8 @@ interface DigestMemory {
 export async function POST(req: NextRequest) {
   const { userId, email } = await req.json();
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   const res = await ddb.send(new QueryCommand({
     TableName: TABLE,

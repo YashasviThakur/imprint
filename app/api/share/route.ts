@@ -1,29 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMemories, getOrCreateUser } from "@/lib/dynamodb";
+import { requireOwner } from "@/lib/authz";
 import crypto from "crypto";
 
-const SHARE_SECRET = process.env.SHARE_SECRET || process.env.ENCRYPTION_SECRET || "imprint-share-secret-2026";
+// No hardcoded fallback: with a public fallback secret anyone could compute any
+// user's share token offline and read their pinned memories.
+const SHARE_SECRET = process.env.SHARE_SECRET || process.env.ENCRYPTION_SECRET;
 
 function makeToken(userId: string): string {
-  return crypto.createHmac("sha256", SHARE_SECRET).update(userId).digest("hex").slice(0, 24);
+  return crypto.createHmac("sha256", SHARE_SECRET!).update(userId).digest("hex").slice(0, 24);
 }
 
 function verifyToken(token: string, userId: string): boolean {
-  return makeToken(userId) === token;
+  const expected = Buffer.from(makeToken(userId));
+  const provided = Buffer.from(token);
+  return expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
 }
 
-// GET /api/share?token=xxx  →  resolve token → return pinned memories
+// GET /api/share?userId=xxx        → generate a share link (owner only)
+// GET /api/share?token=xxx&userId= → resolve a shared link (public, token-gated)
 export async function GET(req: NextRequest) {
+  if (!SHARE_SECRET) {
+    return NextResponse.json({ error: "Sharing is not configured (SHARE_SECRET missing)" }, { status: 503 });
+  }
   const token = req.nextUrl.searchParams.get("token");
   const userId = req.nextUrl.searchParams.get("userId");
 
-  // If userId provided directly (for generating the token)
+  // Generating the token requires being signed in as that user
   if (userId && !token) {
+    const denied = await requireOwner(userId);
+    if (denied) return denied;
     const t = makeToken(userId);
     return NextResponse.json({ token: t, shareUrl: `${process.env.NEXT_PUBLIC_APP_URL || "https://imprint-ebon.vercel.app"}/share/${t}?uid=${encodeURIComponent(userId)}` });
   }
 
-  // If resolving a shared link
+  // Resolving a shared link is public — the unguessable token IS the grant
   if (token && userId) {
     if (!verifyToken(token, userId)) {
       return NextResponse.json({ error: "Invalid share link" }, { status: 403 });

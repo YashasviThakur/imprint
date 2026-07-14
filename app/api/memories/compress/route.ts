@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMemories, saveMemory, deleteMemory, Topic } from "@/lib/dynamodb";
 import { compressMemories } from "@/lib/compress";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 // POST /api/memories/compress
 // Body: { userId, topic, groqApiKey? }
@@ -11,6 +12,8 @@ export async function POST(req: NextRequest) {
   if (!userId || !topic) {
     return NextResponse.json({ error: "userId and topic required" }, { status: 400 });
   }
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   const key = groqApiKey || process.env.GROQ_API_KEY;
   if (!key) {

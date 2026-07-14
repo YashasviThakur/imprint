@@ -3,6 +3,41 @@
 All notable changes to Imprint are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.3.1] — API authorization pass
+
+Closes an authorization gap: several API routes trusted a `userId` supplied in
+the query string or body, allowing unauthenticated reads/writes against another
+user's data on a public deployment.
+
+### Security
+- **Every user-data route now requires auth.** New `requireOwnerOrKey` guard
+  (`lib/authz.ts`): a request must carry either a NextAuth session that owns the
+  `userId` or an `imp_live_` API key that resolves to it. Applied to
+  `/api/memories` (GET/POST/PATCH/DELETE), `/api/rules`, `/api/sessions`,
+  `/api/projects`, `/api/digest`, `/api/voice`, `/api/github`,
+  `/api/memories/compress`, and `/api/memories/natural-update`.
+- **`/api/keys` no longer leaks keys.** Generating, viewing (masked), or revoking
+  an API key requires the owner's session — previously an unauthenticated `POST`
+  with any `userId` regenerated that user's key **and returned it to the caller**.
+- **Org routes gated.** Creating an org requires being signed in as its admin;
+  reading org memories requires membership; adding members is admin-only.
+- **Share-link hardening.** Removed the hardcoded fallback share secret (anyone
+  could compute any user's share token offline); token generation now requires
+  the owner's session; token comparison is constant-time. Set `SHARE_SECRET` (or
+  `ENCRYPTION_SECRET`) to enable sharing.
+- **Removed the legacy Clerk webhook** (`/api/webhooks/clerk`) — the app uses
+  NextAuth; when `CLERK_WEBHOOK_SECRET` was unset the route accepted unverified
+  payloads that could overwrite any user's profile fields.
+
+### Changed
+- **MCP/sync/stop-hook clients authenticate.** `mcp/server.js`, `mcp/sync.js`,
+  and `mcp/extract-and-save.js` send `Authorization: Bearer <imp_live_ key>` from
+  `IMPRINT_API_KEY` or `apiKey` in `~/.imprint/config.json`. **Breaking:** cloud
+  sync now requires the key (dashboard → API Keys) — purely local usage is
+  unaffected and needs no key.
+- `ARCHITECTURE.md` updated to the 0.3 reality (local-first store, NextAuth,
+  eight MCP tools, provider-fallback LLM stack, new auth model).
+
 ## [0.3.0] — Hybrid, local-first
 
 Imprint is now **local-first**. The MCP server and Stop hook read and write an

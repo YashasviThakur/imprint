@@ -6,6 +6,7 @@ import { rankMemories } from "@/lib/rank";
 import { getMemoryPool, invalidateMemoryPool } from "@/lib/pool";
 import { embed, cosineSimilarity } from "@/lib/embeddings";
 import { optimizeContext } from "@/lib/context-optimizer";
+import { requireOwnerOrKey } from "@/lib/authz";
 import type { Memory } from "@/lib/dynamodb";
 
 // Merge all pinned memories into a result set (pinned first, de-duplicated by id).
@@ -80,6 +81,8 @@ export async function GET(req: NextRequest) {
   const budget   = parseInt(req.nextUrl.searchParams.get("budget") || "2000");
   const limit    = Math.min(parseInt(req.nextUrl.searchParams.get("limit") || "50"), 2000);
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   try {
     // Semantic search: embed the query, rank by cosine similarity
@@ -176,6 +179,8 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const { userId, content, topic, pinned, messages, source, groqApiKey } = body;
   if (!userId) return NextResponse.json({ error: "userId required" }, { status: 400 });
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
 
   try {
     // Direct single-memory save (from MCP)
@@ -341,6 +346,8 @@ export async function PATCH(req: NextRequest) {
   if (!userId || !memoryId || !createdAt) {
     return NextResponse.json({ error: "userId, memoryId, createdAt required" }, { status: 400 });
   }
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   try {
     const updates: any = {};
     if (pinned !== undefined) updates.pinned = pinned;
@@ -364,6 +371,8 @@ export async function DELETE(req: NextRequest) {
   if (!userId || !memoryId || !createdAt) {
     return NextResponse.json({ error: "userId, memoryId, createdAt required" }, { status: 400 });
   }
+  const denied = await requireOwnerOrKey(req, userId);
+  if (denied) return denied;
   try {
     await deleteMemory(userId, memoryId, createdAt);
     invalidateMemoryPool(userId);

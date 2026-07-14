@@ -212,6 +212,8 @@ export function loadConfig() {
     // local user simply never sets a userId, so nothing is ever uploaded anyway.
     syncEnabled: cfg.syncEnabled !== false,
     userId: cfg.userId || process.env.IMPRINT_USER_ID || null,
+    // imp_live_ key for authenticated cloud sync (dashboard → API Keys)
+    apiKey: cfg.apiKey || process.env.IMPRINT_API_KEY || null,
     lastSyncAt: cfg.lastSyncAt || null,
   };
 }

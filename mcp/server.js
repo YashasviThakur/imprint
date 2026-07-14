@@ -32,7 +32,7 @@ import { pushPull, refreshSyncFlag, mirrorSave, mirrorDelete, mirrorPin, mirrorU
 import { available as localEmbedAvailable, MODEL_NAME as EMBED_MODEL } from "./embed-local.js";
 
 const API_BASE = process.env.IMPRINT_API_BASE || "https://imprint-ebon.vercel.app";
-const API_KEY  = process.env.IMPRINT_API_KEY;   // optional secure path (revocable)
+const API_KEY  = process.env.IMPRINT_API_KEY || loadConfig().apiKey;  // required for cloud sync (revocable)
 const PLATFORM = process.env.IMPRINT_PLATFORM || "claude-code";
 
 // Resolved at startup — from env, then local config, then API-key lookup.

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveMemory } from "@/lib/dynamodb";
+import { requireOwnerOrKey } from "@/lib/authz";
 
 export async function POST(req: NextRequest) {
   try {
@@ -8,6 +9,9 @@ export async function POST(req: NextRequest) {
     if (!userId || !githubToken) {
       return NextResponse.json({ error: "userId and githubToken required" }, { status: 400 });
     }
+
+    const denied = await requireOwnerOrKey(req, userId);
+    if (denied) return denied;
 
     const headers = {
       Authorization: `Bearer ${githubToken}`,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getUserIdFromApiKey } from "@/app/api/keys/route";
+import { getUserIdFromApiKey } from "@/lib/authz";
 
 const API_BASE = process.env.NEXT_PUBLIC_APP_URL || "https://imprint-ebon.vercel.app";
 
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
   // Proxy to the internal memories endpoint (handles extraction, embedding, dedup)
   const res = await fetch(`${API_BASE}/api/memories`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${keyHeader}` },
     body: JSON.stringify({
       userId,
       content: content.trim(),
