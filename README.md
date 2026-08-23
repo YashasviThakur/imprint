@@ -558,4 +558,4 @@ imprint/
 
 ---
 
-*Built by Yashasvi Thakur*
+*Built by Yashasvi Thakur and Ayush Raj*
